@@ -43,6 +43,7 @@ WORKER_MS = 2000
 LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "150"))
 CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.5"))
 HOT = os.environ.get("BR_HOT", "1") == "1"
+FP_MAXKEYS = int(os.environ.get("BR_FP_MAXKEYS", "50"))
 LOCAL_BUDGET_S = float(os.environ.get("BR_LOCAL_BUDGET_S", "110"))
 NO_LOCAL = os.environ.get("BR_NO_LOCAL") == "1"
 T0 = time.monotonic()
@@ -106,7 +107,11 @@ def p_of(kind: str, n: int) -> float:
     return min(0.97, sc * _p_of(kind, n))
 
 
-P_ANY = os.environ.get("BR_P_ANY", "1") == "1"
+P_ANY = os.environ.get("BR_P_ANY", "0") == "1"
+# Separate scale for cheap tests (heavy ones keep P_SCALE): cheap local runs rarely
+# changed the board's simulated time but cost CPU.
+P_SCALE_CHEAP = os.environ.get("BR_P_SCALE_CHEAP", "0.8")
+HEAVY_LOCAL_MS = int(os.environ.get("BR_HEAVY_LOCAL_MS", "3000"))
 
 
 def a_of(kind: str, n: int) -> float:
@@ -286,7 +291,7 @@ def main() -> None:
         users = 0
         for key in changed:
             u = an.state_key_users(key)
-            if u is None or len(changed) >= 50:
+            if u is None or len(changed) >= FP_MAXKEYS:
                 users = an.all_bits
                 break
             users |= u
@@ -359,7 +364,10 @@ def main() -> None:
                 groups = [] if P_ANY else None
                 for kind, S in (("medium", md_), ("strong", st_), ("file", files)):
                     for n in S:
-                        pmap[n] = max(pmap.get(n, 0.0), p_of(kind, len(S)))
+                        pv = p_of(kind, len(S))
+                        if P_SCALE_CHEAP and kind != "file" and ms[n] < HEAVY_LOCAL_MS:
+                            pv = min(0.97, pv * float(P_SCALE_CHEAP) / P_SCALE)
+                        pmap[n] = max(pmap.get(n, 0.0), pv)
                     if S and groups is not None:
                         groups.append((set(S), a_of(kind, len(S))))
             else:

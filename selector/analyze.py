@@ -24,6 +24,7 @@ IMPORT_LOCAL = os.environ.get("BR_IMPORT_LOCAL", "1") == "1"
 CLASS_HEADER_NAME = os.environ.get("BR_CLASS_HEADER_NAME", "1") == "1"
 KEEP_TREES = os.environ.get("BR_KEEP_TREES", "0") == "1"
 PURE_INSERT = os.environ.get("BR_PURE_INSERT", "1") == "1"
+STRUCT = os.environ.get("BR_STRUCT", "1") == "1"
 
 
 @dataclass
@@ -114,6 +115,10 @@ class Analyzer:
                 if self._new_file(fd, res):
                     continue
                 return res
+            if STRUCT and self._structural(fd, res):
+                if res.broad:
+                    return res
+                continue
             if fd.binary or fd.rename or fd.is_new or fd.is_deleted or fd.mode_change:
                 res.broad = f"structural change {fd.path}"
                 return res
@@ -170,6 +175,78 @@ class Analyzer:
             res.notes.append(f"{path}: new module, {bin(listers).count('1')} dir listers")
             return True
         res.broad = f"new file outside package {path}"
+        return False
+
+    def _structural(self, fd: FileDiff, res: Result) -> bool:
+        """Mode changes, binary files, deletions and renames that need not run everything.
+        True when handled here (res.broad may still be set)."""
+        def inert(p):
+            return (p.startswith(INERT_PREFIXES) or p.endswith(INERT_SUFFIXES)) and not self.opens(p) \
+                and p not in self.m["parent_opens"]
+
+        def listers(p):
+            out, d = 0, os.path.dirname(p)
+            while True:
+                sid = self.m["opens"].get("<dir>" + d) if d else self.m["opens"].get("<dir>")
+                if sid is not None:
+                    out |= self.sets[sid]
+                if not d:
+                    break
+                d = os.path.dirname(d)
+            return out
+
+        def gone(p):
+            """p no longer exists (deleted, or renamed away)."""
+            if inert(p):
+                res.notes.append(f"{p}: inert path removed")
+                return
+            t = self.opens(p) | listers(p)
+            if p.startswith("tests/") and p.endswith(".py"):
+                mod = p[:-3].replace("/", ".")
+                t |= self.m["file_tests"].get(p, 0) | self.m["test_importers"].get(mod, 0)
+                t |= self.collect_file(p)
+                res.notes.append(f"{p}: test module removed")
+            elif p.startswith("tests/") and p not in self.m["parent_opens"]:
+                res.notes.append(f"{p}: data file removed")
+            else:
+                res.broad = f"removed {p}"
+                return
+            res.tests |= t
+            res.strong |= t
+            res.file_readers |= t
+
+        if fd.mode_change and not (fd.binary or fd.rename or fd.is_new or fd.is_deleted) and not fd.hunks:
+            res.notes.append(f"{fd.path}: mode change only")
+            return True
+        if fd.binary and not fd.rename:
+            p = fd.path
+            if inert(p):
+                res.notes.append(f"{p}: inert binary")
+                return True
+            if p.startswith("tests/") and p not in self.m["parent_opens"] and not fd.is_deleted:
+                t = self.opens(p) | listers(p)
+                res.tests |= t
+                res.strong |= t
+                res.file_readers |= t
+                res.notes.append(f"{p}: binary data, {bin(t).count('1')} readers")
+                return True
+            return False
+        if fd.is_deleted and not fd.binary:
+            gone(fd.old_path)
+            return True
+        if fd.rename and not fd.binary and not fd.hunks and fd.old_path and fd.new_path:
+            gone(fd.old_path)
+            if res.broad:
+                return True
+            np_ = fd.new_path
+            if not (np_.startswith("tests/") or inert(np_)):
+                res.broad = f"renamed into {np_}"
+                return True
+            t = listers(np_)
+            res.tests |= t
+            res.strong |= t
+            res.notes.append(f"{np_}: renamed in")
+            return True
         return False
 
     # ---- non-python files ------------------------------------------------

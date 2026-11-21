@@ -43,6 +43,8 @@ def _child_gc() -> None:
     _gc.set_threshold(*_GC_DEFAULT)
 
 
+FP_MAXKEYS = int(os.environ.get("BR_FP_MAXKEYS", "50"))
+
 _WARM = [False]
 
 
@@ -354,7 +356,7 @@ def _fp_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int) -> 
         out = ["<error> " + repr(e)[:200]]
     finally:
         try:
-            os.write(wfd, (json.dumps(out[:50]) + "\n").encode())
+            os.write(wfd, (json.dumps(out[:FP_MAXKEYS]) + "\n").encode())
         finally:
             os._exit(0)
 
@@ -444,7 +446,7 @@ def _fp_test_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int
             out = fingerprint.diff(base, fingerprint.fingerprint(loose_only=True))
         except BaseException as e:  # noqa: BLE001
             out = ["<error> " + repr(e)[:200]]
-        os.write(wfd, (json.dumps({"fp": out[:50]}) + "\n").encode())
+        os.write(wfd, (json.dumps({"fp": out[:FP_MAXKEYS]}) + "\n").encode())
         if out and out[0].startswith("<error>"):
             return  # cannot import: parent will list tests without local runs
         buf = b""

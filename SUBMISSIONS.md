@@ -20,3 +20,4 @@
 | 16 | `44495c74` | Sat 11:36 AM | 174.2 | 145.6 | 28.6 | 0 | v13: hot-swap local runs (no re-import for function-body patches), new-function insertions, faster parent. CPU -8.3. Best so far, safe |
 | 17 | `798da171` | Sat 12:37 PM | 184.0 | 145.6 | 37.5 | 0 | v13b (A/B): correlated failure odds: more local runs, same simulated, CPU +8.9. Reverted |
 | 18 | `9d4a2aed` | Sat 1:38 PM | 173.3 | 145.6 | 27.6 | 0 | v13d: cheap tests odds x0.8, structural patches handled, metadata files inert. Best so far |
+| 19 | `18cf28a9` | Sat 2:40 PM | 174.1 | 145.6 | 28.5 | 0 | v13e: no blank-line pins for inserted code (labels only; board same) |

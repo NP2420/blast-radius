@@ -15,4 +15,5 @@
 | 11 | `28cdf6be` | Sat 6:30 AM | 185.2 | 145.6 | 39.5 | 0 | v12g: class-header edits narrowed to class users + referencing classes, odds x0.6. Simulated -25 vs v12f, CPU +19 |
 | 12 | `20104064` | Sat 7:32 AM | 190.3 | 171.0 | 19.2 | 0 | v12h (A/B): v12g at odds x1.0. Header fix had no board effect; v12g's -25 s simulated came from more local runs |
 | 13 | `1d041936` | Sat 8:33 AM | 190.8 | 171.0 | 19.7 | 0 | v12i: odds x0.75 (fixtures x1.0). The -25 s from x0.6 is one heavy test run locally; x0.75 lists it again |
-| 14 | `a4a48072` | Sat 9:34 AM | 182.7 | 147.7 | 35.0 | 0 | v12j: odds x0.6, fixture readers x1.0. Best safe score |
+| 14 | `a4a48072` | Sat 9:34 AM | 182.1 | 147.7 | 35.0 | 0 | v12j: odds x0.6, fixture readers x1.0. Best safe score |
+| 15 | `ff41f0f9` | Sat 10:35 AM | 182.4 | 145.6 | 36.8 | 0 | v12k: local overhead 150 ms |

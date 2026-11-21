@@ -239,6 +239,11 @@ def main() -> None:
     for p in patches:
         cid = p.stem
         res = analyses[cid]
+        if res.broad and os.environ.get("BR_DIAG_BROAD_EMPTY", "1") == "1":
+            # DIAGNOSTIC BRANCH: list nothing for commits that would fall back to every test.
+            decisions[cid] = {"include": [], "local": [], "broad": res.broad, "cond": []}
+            log(f"{cid}: BROAD -> empty (diagnostic)")
+            continue
         if res.broad:
             decisions[cid] = {"include": all_nums, "local": [], "broad": res.broad, "cond": []}
             log(f"{cid}: BROAD ({res.broad})")

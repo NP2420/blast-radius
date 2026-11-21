@@ -21,3 +21,4 @@
 | 17 | `798da171` | Sat 12:37 PM | 184.0 | 145.6 | 37.5 | 0 | v13b (A/B): correlated failure odds: more local runs, same simulated, CPU +8.9. Reverted |
 | 18 | `9d4a2aed` | Sat 1:38 PM | 173.3 | 145.6 | 27.6 | 0 | v13d: cheap tests odds x0.8, structural patches handled, metadata files inert. Best so far |
 | 19 | `18cf28a9` | Sat 2:40 PM | 174.1 | 145.6 | 28.5 | 0 | v13e: no blank-line pins for inserted code (labels only; board same) |
+| 20 | `912006fc` | Sat 3:41 PM | ~182 | 145.6 | 36.7 | 0 | v14c: prewarmed executor tables, lazy TPC tasks + early subtest stop, skip teardown. CPU +8 vs v13d: prewarm suspected (memory), disabled next |

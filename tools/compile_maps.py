@@ -278,6 +278,27 @@ def main() -> None:
                     for nm in names:
                         name_line_bits[nm] = name_line_bits.get(nm, 0) | bits
 
+    # Which test files import which names from which sqlglot modules
+    # ("sqlglot.helper:seq_get" -> tests of files that do `from sqlglot.helper import seq_get`).
+    test_name_imports: dict[str, int] = {}
+    ftb = {}
+    for t in tests:
+        ftb[t["file"]] = ftb.get(t["file"], 0) | (1 << idx[t["id"]])
+    for py in Path(repo, "tests").rglob("*.py"):
+        rel = str(py.relative_to(repo))
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        bits_f = ftb.get(rel, 0)
+        if not bits_f:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("sqlglot"):
+                for a_ in node.names:
+                    k_ = f"{node.module}:{a_.name}"
+                    test_name_imports[k_] = test_name_imports.get(k_, 0) | bits_f
+
     # Tests per test file, and test-module import graph (static, transitive).
     file_tests: dict[str, int] = {}
     for t in tests:
@@ -353,6 +374,7 @@ def main() -> None:
         "name_users": {k: sid(b) for k, b in name_bits.items()},
         "attr_refs": {k: sid(b) for k, b in attr_bits.items() if b},
         "import_ref_names": import_ref_names,
+        "test_name_imports": {k: sid(b_) for k, b_ in test_name_imports.items()},
         "import_func_refs": import_func_refs,
         "import_const_keys": import_const_keys,
         "name_line_users": {k: sid(b) for k, b in name_line_bits.items()},

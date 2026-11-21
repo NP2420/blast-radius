@@ -285,11 +285,13 @@ def _fp_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int) -> 
             if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
                 del sys.modules[name]
         importlib.invalidate_caches()
-        import pickle
         import fingerprint
-        with open(base_path, "rb") as f:
-            base = pickle.load(f)
-        out = fingerprint.diff(base, fingerprint.fingerprint())
+        base = _FP_BASE[0]
+        if base is None:
+            import pickle
+            with open(base_path, "rb") as f:
+                base = pickle.load(f)
+        out = fingerprint.diff(base, fingerprint.fingerprint(loose_only=True))
     except BaseException as e:  # noqa: BLE001
         out = ["<error> " + repr(e)[:200]]
     finally:
@@ -299,10 +301,17 @@ def _fp_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int) -> 
             os._exit(0)
 
 
+_FP_BASE = [None]
+
+
 def fp_check_many(repo: str, tmp: str, base_path: str, jobs: list, parallel: int = 2,
                   timeout: float = 40.0, log=None) -> dict:
     """jobs: [(commit, patched)] -> {commit: list of changed state keys (["<error>"] on failure)}."""
     res: dict = {}
+    if _FP_BASE[0] is None and jobs:
+        import pickle
+        with open(base_path, "rb") as f:
+            _FP_BASE[0] = pickle.load(f)  # loaded once; forked checks share it
     pending = list(jobs)
     active: dict = {}
     while pending or active:

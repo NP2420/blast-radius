@@ -17,6 +17,7 @@ INERT_PREFIXES = ("benchmarks/", "posts/", "pdoc/", "docs/", ".github/", "sqlglo
 INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
+MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
 
 
 @dataclass
@@ -33,6 +34,7 @@ class Result:
     equiv: bool = False                            # every code change is an is/== swap against None/enum
     key_attrs: set = field(default_factory=set)    # names edited at import level (expected to differ in fingerprint)
     state_guard: bool = False                      # class/module edit: fingerprint ripple check required
+    state_guard_pending: bool = False
     broad: str | None = None                       # reason, if we must run everything
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
@@ -300,7 +302,9 @@ class Analyzer:
             # changes beyond the edited names: other modules' tables, import errors).
             before = res.tests
             res.tests = 0
+            res.state_guard_pending = True
             self._import_time_heur(path, module, kind, idx, ln, res, tree)
+            res.state_guard_pending = False
             res.import_heur |= res.tests
             res.tests = before
             res.import_fp = True
@@ -352,6 +356,26 @@ class Analyzer:
             if path.startswith("tests/"):
                 res.tests |= self._name_users(names)
             res.notes.append(f"{path}:{ln} class body {qual}")
+            return
+        if k == "module" and MODULE_NARROW and path.startswith("sqlglot/") and res.state_guard_pending:
+            # Module-level statement in sqlglot: runtime readers of the edited names
+            # (line level), test files importing those names, the fresh-interpreter
+            # test; the fingerprint ripple guard covers import-time effects.
+            names = self._alias_closure(idx.names_assigned(ln))
+            nl = self.m.get("name_line_users", {})
+            for n in names:
+                sid = nl.get(n)
+                if sid is not None:
+                    res.tests |= self.sets[sid]
+                sid = self.m.get("test_name_imports", {}).get(f"{module}:{n}")
+                if sid is not None:
+                    res.tests |= self.sets[sid]
+                # A class header (bases, decorators) changes every instance's behaviour;
+                # the fingerprint hashes class dicts, not MROs, so add the class's users.
+                res.tests |= self.recv(f"{module}:{n}")
+            res.tests |= self.m["proc_tests"]
+            res.tests |= self.collect_file(path) if path.startswith("tests/") else 0
+            res.notes.append(f"{path}:{ln} module level (names {sorted(names)[:4]})")
             return
         if k == "module":
             res.tests |= self.cov_file(path)

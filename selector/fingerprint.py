@@ -22,9 +22,22 @@ _MAX_DEPTH = 8
 
 
 _LOOSE = [False]
+_MEMO: dict = {}  # id(obj) -> (obj, digest-string) for functions within one fingerprint run
 
 
 def _h(x, depth: int, seen: set) -> str:
+    t = type(x)
+    if t is types.FunctionType:
+        hit = _MEMO.get((id(x), _LOOSE[0]))
+        if hit is not None and hit[0] is x:
+            return hit[1]
+        r = _h_inner(x, depth, seen)
+        _MEMO[(id(x), _LOOSE[0])] = (x, r)
+        return r
+    return _h_inner(x, depth, seen)
+
+
+def _h_inner(x, depth: int, seen: set) -> str:
     t = type(x)
     if x is None or t in (bool, int, float, complex, str, bytes):
         return t.__name__ + ":" + repr(x)
@@ -105,15 +118,19 @@ def import_all() -> list:
     return mods
 
 
-def fingerprint() -> dict[str, tuple]:
-    """{"module:name" or "module:Class.attr": (strict, loose) digests} for all sqlglot state."""
+def fingerprint(loose_only: bool = False) -> dict[str, tuple]:
+    """{"module:name" or "module:Class.attr": (strict, loose) digests} for all sqlglot state.
+
+    loose_only (run time): skip the strict digest; diff() compares loose digests only.
+    """
+    _MEMO.clear()
     out: dict[str, tuple] = {}
 
     def one(v) -> str:
         return hashlib.blake2b(_h(v, 0, set()).encode("utf-8", "surrogatepass"), digest_size=12).hexdigest()
 
     def dig(v) -> tuple:
-        strict = one(v)
+        strict = None if loose_only else one(v)
         _LOOSE[0] = True
         try:
             loose = one(v)

@@ -36,7 +36,7 @@ DROP_WEAK_HEAVY = os.environ.get("BR_DROP_WEAK_HEAVY", "1") == "1"
 HEAVY_MS = int(os.environ.get("BR_HEAVY_MS", "1000"))
 EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "500"))
 # Per-query runs of heavy executor tests (tpcds); off by default.
-TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "0") == "1"
+TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "1") == "1"
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
 LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "300"))

@@ -19,7 +19,7 @@ INERT_PREFIXES = ("benchmarks/", "posts/", "pdoc/", "docs/", ".github/", "sqlglo
 INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
-MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
+MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "0") == "1"
 IMPORT_LOCAL = os.environ.get("BR_IMPORT_LOCAL", "1") == "1"
 
 
@@ -365,7 +365,8 @@ class Analyzer:
                 res.tests |= self._name_users(names)
             res.notes.append(f"{path}:{ln} class body {qual}")
             return
-        if k == "module" and MODULE_NARROW and path.startswith("sqlglot/") and res.state_guard_pending:
+        if (k == "module" and path.startswith("sqlglot/") and res.state_guard_pending
+                and (MODULE_NARROW or isinstance(idx.stmt_at(ln), ast.ClassDef))):
             # Module-level statement in sqlglot: runtime readers of the edited names
             # (line level), test files importing those names, the fresh-interpreter
             # test; the fingerprint ripple guard covers import-time effects.

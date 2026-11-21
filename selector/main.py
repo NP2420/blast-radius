@@ -93,7 +93,7 @@ P_MEDIUM = float(os.environ.get("BR_P_MEDIUM", "0.15"))
 P_BY_SIZE = os.environ.get("BR_P_BY_SIZE", "1") == "1"
 
 
-P_SCALE = float(os.environ.get("BR_P_SCALE", "1.5"))
+P_SCALE = float(os.environ.get("BR_P_SCALE", "1.0"))
 
 
 def p_of(kind: str, n: int) -> float:

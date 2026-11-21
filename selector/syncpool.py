@@ -11,6 +11,32 @@ import pickle
 
 
 ALLOWED = [None]  # set of submission indices to run for the current test; None = all
+LAZY = [False]    # run each task only when its result is first asked for (tests that read results in order)
+
+
+class _LazyFuture(cf.Future):
+    def __init__(self, payload):
+        super().__init__()
+        self._payload = payload
+
+    def _run(self):
+        if self.done() or self._payload is None:
+            return
+        payload, self._payload = self._payload, None
+        try:
+            fn_, args_, kwargs_ = pickle.loads(payload)
+            res = fn_(*args_, **kwargs_)
+            self.set_result(pickle.loads(pickle.dumps(res)))
+        except BaseException as e:  # noqa: BLE001 - mirror pool behaviour
+            self.set_exception(e)
+
+    def result(self, timeout=None):
+        self._run()
+        return super().result(timeout)
+
+    def exception(self, timeout=None):
+        self._run()
+        return super().exception(timeout)
 
 
 class SyncExecutor(cf.Executor):
@@ -28,6 +54,8 @@ class SyncExecutor(cf.Executor):
         if allowed is not None and idx not in allowed:
             fut.set_result(None)  # executor tests skip queries whose result is None
             return fut
+        if LAZY[0]:
+            return _LazyFuture(pickle.dumps((fn, args, kwargs)))
         try:
             fn_, args_, kwargs_ = pickle.loads(pickle.dumps((fn, args, kwargs)))
             res = fn_(*args_, **kwargs_)

@@ -154,7 +154,26 @@ def build_farm(repo: str, farm: str, patched: dict[str, str | None]) -> None:
             f.write(text)
 
 
+EARLY_STOP = os.environ.get("BR_EARLY_STOP", "1") == "1"
+_LAZY_TESTS = {"tests/test_executor.py::TestExecutor::test_execute_tpcds",
+               "tests/test_executor.py::TestExecutor::test_execute_tpch"}
+
+
 class _Result(unittest.TestResult):
+    # A failing subtest already fails its test: with failfast set, unittest ends the
+    # test there instead of running its remaining subtests. stop() is a no-op so a
+    # failure never ends the rest of the suite.
+    @property
+    def failfast(self):
+        return EARLY_STOP
+
+    @failfast.setter
+    def failfast(self, value):
+        pass
+
+    def stop(self):
+        pass
+
     def __init__(self, out):
         super().__init__()
         self.out = out
@@ -165,8 +184,12 @@ class _Result(unittest.TestResult):
         self.cur_fail = False
         sp = getattr(self, "syncpool", None)
         if sp is not None:
-            a = getattr(self, "allowed", {}).get(getattr(test, "_bt_id", None))
+            tid = getattr(test, "_bt_id", None)
+            a = getattr(self, "allowed", {}).get(tid)
             sp.ALLOWED[0] = set(a) if a is not None else None
+            # TPC executor tests read pool results in submission order: compute each
+            # query only when asked, so a test stopped at its first failure skips the rest.
+            sp.LAZY[0] = EARLY_STOP and tid in _LAZY_TESTS
 
     def _fail(self):
         self.cur_fail = True

@@ -68,6 +68,66 @@ def warm_import(repo: str) -> bool:
     return _WARM[0]
 
 
+_PREWARM: dict = {}
+_EXEC_CLS = "tests/test_executor.py::TestExecutor"
+
+
+def prewarm_executor(repo: str) -> bool:
+    """Build TestExecutor's TPC-H/TPC-DS row tables once (pure csv parsing into
+    sqlglot executor Tables); hot children reuse them instead of re-parsing ~1.5 s."""
+    if "exec" in _PREWARM:
+        return True
+    try:
+        sys.path.insert(0, repo)
+        try:
+            import tests.test_executor as te
+            k = te.TestExecutor
+            k.setUpClass()
+            k.tearDownClass()
+            _PREWARM["exec"] = {"tpch_tables": k.tpch_tables, "tpcds_tables": k.tpcds_tables,
+                                "tpch_sqls": k.tpch_sqls, "tpcds_sqls": k.tpcds_sqls}
+        finally:
+            sys.path.remove(repo)
+            for name in list(sys.modules):
+                if name == "tests" or name.startswith("tests."):
+                    del sys.modules[name]
+        return True
+    except Exception:
+        _PREWARM.pop("exec", None)
+        return False
+
+
+def _use_prewarmed_executor(mod) -> None:
+    """In a hot child: TestExecutor.setUpClass opens fresh DuckDB views but takes the
+    row tables from the parent."""
+    data = _PREWARM.get("exec")
+    k = getattr(mod, "TestExecutor", None)
+    if data is None or k is None:
+        return
+    import duckdb
+
+    def setUpClass(cls):
+        cls.tpch_conn = duckdb.connect()
+        cls.tpcds_conn = duckdb.connect()
+        for conn, directory, schema in ((cls.tpch_conn, mod.DIR_TPCH, mod.TPCH_SCHEMA),
+                                        (cls.tpcds_conn, mod.DIR_TPCDS, mod.TPCDS_SCHEMA)):
+            for table, columns in schema.items():
+                conn.execute(
+                    f"""
+                CREATE VIEW {table} AS
+                SELECT *
+                FROM READ_CSV('{directory}{table}.csv.gz', delim='|', header=True, columns={columns})
+                """
+                )
+        cls.tpch_tables = data["tpch_tables"]
+        cls.tpcds_tables = data["tpcds_tables"]
+        cls.cache = {}
+        cls.tpch_sqls = list(data["tpch_sqls"])
+        cls.tpcds_sqls = list(data["tpcds_sqls"])
+
+    k.setUpClass = classmethod(setUpClass)
+
+
 def build_farm(repo: str, farm: str, patched: dict[str, str | None]) -> None:
     """Symlink farm of repo at farm, with patched files written for real."""
     if os.path.exists(farm):
@@ -170,14 +230,16 @@ def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int, a
                 if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
                     del sys.modules[name]
         importlib.invalidate_caches()
-        _run_tests(wfd, test_ids, allowed)
+        reuse = hot and "exec" in _PREWARM and not any(
+            p.startswith(("tests/", "sqlglot/executor/")) for p in patched)
+        _run_tests(wfd, test_ids, allowed, prewarmed=reuse)
     except BaseException:
         pass
     finally:
         os._exit(0)
 
 
-def _run_tests(wfd: int, test_ids: list, allowed: dict | None) -> None:
+def _run_tests(wfd: int, test_ids: list, allowed: dict | None, prewarmed: bool = False) -> None:
     """Run unittest methods in this (already prepared) process, streaming results."""
     if True:
         import syncpool
@@ -195,6 +257,8 @@ def _run_tests(wfd: int, test_ids: list, allowed: dict | None) -> None:
             modname = file[:-3].replace("/", ".")
             try:
                 mod = importlib.import_module(modname)
+                if prewarmed and f"{file}::{cls}" == _EXEC_CLS:
+                    _use_prewarmed_executor(mod)
                 klass = getattr(mod, cls)
                 cases = []
                 for tid, meth in items:

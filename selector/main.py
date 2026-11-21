@@ -23,7 +23,8 @@ sys.path.insert(0, str(HERE))
 
 import analyze  # noqa: E402
 import patchparse  # noqa: E402
-from runner import LocalRunner, fp_then_tests, preload, warm_import  # noqa: E402
+from runner import LocalRunner, fp_then_tests, preload, warm_import, prewarm_executor  # noqa: E402
+EXEC_CLS = "tests/test_executor.py::TestExecutor"
 import hotswap  # noqa: E402
 
 DATA = Path(os.environ.get("BR_DATA", "/data"))
@@ -44,6 +45,9 @@ LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "150"))
 CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.5"))
 HOT = os.environ.get("BR_HOT", "1") == "1"
 FP_MAXKEYS = int(os.environ.get("BR_FP_MAXKEYS", "50"))
+PREWARM = os.environ.get("BR_PREWARM", "1") == "1"
+PREWARM_PLAN = os.environ.get("BR_PREWARM_PLAN", "0") == "1"
+PREWARM_SETUP_MS = int(os.environ.get("BR_PREWARM_SETUP_MS", "150"))
 LOCAL_BUDGET_S = float(os.environ.get("BR_LOCAL_BUDGET_S", "110"))
 NO_LOCAL = os.environ.get("BR_NO_LOCAL") == "1"
 T0 = time.monotonic()
@@ -339,6 +343,14 @@ def main() -> None:
             LOCAL_MS[n_] = int(300 + saved_local[n_] * len(qs) / max(1, maps["task_cov"][tid]["n"]))
             res.notes.append(f"{tid.split('::')[-1]}: {len(qs)} queries")
         cond: list[int] = []
+        # Hot-swappable commits that leave the executor and tests alone reuse the
+        # parent's TPC tables: TestExecutor's class setup is nearly free there.
+        saved_setup = CLASS_SETUP_MS.get(EXEC_CLS)
+        if PREWARM_PLAN and saved_setup is not None and HOT and not res.import_fp and not any(
+                p.startswith(("tests/", "sqlglot/executor/")) for p in res.patched):
+            code = {p: t for p, t in res.patched.items()}
+            if code and hotswap.plan(REPO, code) is not None:
+                CLASS_SETUP_MS[EXEC_CLS] = PREWARM_SETUP_MS
         if EQUIV and res.equiv and cands:
             # Swap with no semantic effect: probe with cheap candidates (strong first);
             # list the rest only if a probe fails.
@@ -376,6 +388,8 @@ def main() -> None:
                 groups = None
             inc, loc = plan(sorted(cands), ms, strong, medium, pmap, groups)
         LOCAL_MS.update(saved_local)
+        if saved_setup is not None:
+            CLASS_SETUP_MS[EXEC_CLS] = saved_setup
         allowed = {t: sorted(q) for t, q in allowed.items() if num_by_id[t] in set(loc)}
         decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
@@ -471,6 +485,10 @@ def main() -> None:
         if any(j[4] is not None for j in jobs):
             if not warm_import(REPO):
                 jobs = [j[:4] + (None,) for j in jobs]
+            # Worth it (~1.6 s once) when two or more children would each rebuild the tables.
+            if PREWARM and sum(1 for j in jobs if j[4] is not None and any(t.startswith(EXEC_CLS + "::") for t in j[2])
+                               and not any(p.startswith(("tests/", "sqlglot/executor/")) for p in j[1])) >= 2:
+                prewarm_executor(REPO)
             gc.collect()
             gc.freeze()
         runner = LocalRunner(REPO, TMP, sec_by_id, log=log)

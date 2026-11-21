@@ -42,10 +42,15 @@ def apply_patch(work: Path, text: str) -> str | None:
 def run_suite(work: Path, outcome: Path, jobs: str = JOBS) -> dict:
     env = dict(os.environ, SKIP_INTEGRATION="0", OUTCOME_FILE=str(outcome),
                PYTHONPATH=f"{work}:{TOOLS}", PYTHONDONTWRITEBYTECODE="1")
-    subprocess.run([str(PY), "-m", "pytest", "tests", "-p", "outcome_plugin",
-                    "-p", "no:cacheprovider", "-q", "--no-header", "-n", jobs],
-                   cwd=work, env=env, stdout=subprocess.DEVNULL,
-                   stderr=subprocess.DEVNULL, timeout=1800)
+    if outcome.exists():
+        outcome.unlink()
+    r = subprocess.run([str(PY), "-m", "pytest", "tests", "-p", "outcome_plugin",
+                        "-p", "no:cacheprovider", "-q", "--no-header", "-n", jobs],
+                       cwd=work, env=env, capture_output=True, text=True, timeout=1800)
+    if not outcome.exists():
+        tail = (r.stdout + r.stderr)[-3000:]
+        print(f"pytest wrote no outcome (exit {r.returncode}):\n{tail}", file=sys.stderr, flush=True)
+        raise RuntimeError("pytest failed to run")
     return json.loads(outcome.read_text())
 
 
@@ -75,7 +80,10 @@ def main() -> None:
             out["commits"][cid] = {"failing": None, "apply_ok": False, "err": err}
             print(cid, "APPLY FAILED", file=sys.stderr)
         else:
-            d = run_suite(work, tmp / "outcome.json")
+            try:
+                d = run_suite(work, tmp / "outcome.json")
+            except RuntimeError:
+                continue
             fail = {by_id[n] for n in d["failed"] if n in by_id}
             for f in d["bad_files"]:
                 fail.update(by_file.get(f, []))

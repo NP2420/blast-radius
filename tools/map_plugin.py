@@ -44,6 +44,14 @@ def _audit(event, args):
             rel = _rel(a)
             if rel and "__pycache__" not in rel:
                 _opens.add(rel)
+    elif event in ("os.listdir", "os.scandir", "glob.glob"):
+        a = args[0] if args else None
+        if a is None or a == "":
+            a = "."
+        if isinstance(a, (str, bytes, os.PathLike)):
+            rel = _rel(a if event != "glob.glob" else os.path.dirname(os.fspath(a)) or ".")
+            if rel is not None:
+                _opens.add("<dir>" + rel.rstrip("/"))
     elif event == "subprocess.Popen":
         try:
             _procs.append([str(x) for x in args[1]][:30])

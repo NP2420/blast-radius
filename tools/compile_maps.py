@@ -220,6 +220,52 @@ def main() -> None:
 
         scan(tree.body, False)
 
+    # Line-level readers of each name: tests that executed a statement in which
+    # the name appears (attribute, bare name, or identifier-like string constant).
+    name_line_bits: dict[str, int] = {}
+    for py in Path(repo, "sqlglot").rglob("*.py"):
+        rel = str(py.relative_to(repo))
+        fm = cov.get(rel)
+        if not fm:
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            body = fn.body if isinstance(fn.body, list) else [fn.body]
+            for st in (n for b in body for n in ast.walk(b) if isinstance(n, (ast.stmt, ast.expr)) and hasattr(n, "lineno")):
+                if not isinstance(st, ast.stmt) and not isinstance(fn, ast.Lambda):
+                    continue
+                own = range(st.lineno, (getattr(st, "end_lineno", None) or st.lineno) + 1)
+                if isinstance(st, (ast.If, ast.For, ast.While, ast.With, ast.Try, ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef, ast.Match)):
+                    first_child = min((c.lineno for c in getattr(st, "body", []) if hasattr(c, "lineno")), default=st.lineno + 1)
+                    own = range(st.lineno, max(st.lineno, first_child - 1) + 1)
+                    nodes = [st.test] if hasattr(st, "test") else ([st.iter, st.target] if hasattr(st, "iter") else (st.items if hasattr(st, "items") else []))
+                    if isinstance(st, ast.Match):
+                        nodes = [st.subject]
+                else:
+                    nodes = [st]
+                names = set()
+                for nd in nodes:
+                    for sub in ast.walk(nd):
+                        if isinstance(sub, ast.Attribute):
+                            names.add(sub.attr)
+                        elif isinstance(sub, ast.Name):
+                            names.add(sub.id)
+                        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value.isidentifier():
+                            names.add(sub.value)
+                if not names:
+                    continue
+                bits = 0
+                for ln in own:
+                    bits |= fm.get(ln, 0)
+                if bits:
+                    for nm in names:
+                        name_line_bits[nm] = name_line_bits.get(nm, 0) | bits
+
     # Tests per test file, and test-module import graph (static, transitive).
     file_tests: dict[str, int] = {}
     for t in tests:
@@ -295,6 +341,7 @@ def main() -> None:
         "name_users": {k: sid(b) for k, b in name_bits.items()},
         "attr_refs": {k: sid(b) for k, b in attr_bits.items() if b},
         "import_ref_names": import_ref_names,
+        "name_line_users": {k: sid(b) for k, b in name_line_bits.items()},
         "aliases": {k: sorted(v) for k, v in aliases.items() if v},
         "funcs": funcs,
         "file_tests": file_tests,

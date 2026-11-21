@@ -22,6 +22,7 @@ ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 class Result:
     tests: int = 0                                 # bitset over map test indexes
     strong: int = 0                                # direct evidence: executed the changed statement / read the file
+    medium: int = 0                                # read the changed class attribute by name (line level)
     import_fp: bool = False                        # touches code run at import: check state fingerprint
     import_heur: int = 0                           # import-time candidates by heuristics (used if no fingerprint)
     fp_func: bool = False                          # function code that also runs at import changed
@@ -92,7 +93,12 @@ class Analyzer:
     # ---- top level -------------------------------------------------------
     def analyze(self, fds: list[FileDiff]) -> Result:
         res = Result()
+        has_dirs = any(k.startswith("<dir>") for k in self.m["opens"])
         for fd in fds:
+            if fd.is_new and not (fd.binary or fd.rename or fd.mode_change) and has_dirs:
+                if self._new_file(fd, res):
+                    continue
+                return res
             if fd.binary or fd.rename or fd.is_new or fd.is_deleted or fd.mode_change:
                 res.broad = f"structural change {fd.path}"
                 return res
@@ -116,6 +122,40 @@ class Analyzer:
                 res.nonequiv_files = getattr(res, "nonequiv_files", 0) + 1
         res.equiv = getattr(res, "equiv_files", 0) > 0 and getattr(res, "nonequiv_files", 0) == 0
         return res
+
+    def _new_file(self, fd: FileDiff, res: Result) -> bool:
+        """A file that did not exist: only code that lists its directory, or that a
+        patched module makes import it, can see it. False -> res.broad set."""
+        path = fd.path
+        try:
+            new = apply("", fd) if fd.hunks else ""
+        except ApplyError as e:
+            res.broad = f"apply failed {path}: {e}"
+            return False
+        res.patched[path] = new
+        d = os.path.dirname(path)
+        listers = 0
+        while True:
+            sid = self.m["opens"].get("<dir>" + d)
+            if sid is not None:
+                listers |= self.sets[sid]
+            if not d:
+                break
+            d = os.path.dirname(d)
+        res.tests |= listers
+        res.strong |= listers
+        if path.startswith("tests/") or path.startswith(INERT_PREFIXES) or path.endswith(INERT_SUFFIXES):
+            res.notes.append(f"{path}: new file, {bin(listers).count('1')} dir listers")
+            return True
+        if path.startswith("sqlglot/"):
+            # Imported only by name; tests that pass names in (dialect names...) or walk
+            # the package see it. Import-time names elsewhere are caught by the
+            # importing file's own diff.
+            res.tests |= self.m["proc_tests"]
+            res.notes.append(f"{path}: new module, {bin(listers).count('1')} dir listers")
+            return True
+        res.broad = f"new file outside package {path}"
+        return False
 
     # ---- non-python files ------------------------------------------------
     def _data_file(self, path: str, res: Result) -> None:
@@ -264,10 +304,11 @@ class Analyzer:
             narrowed = self._attr_narrow(module, qual, idx.names_assigned(ln)) if ATTR_NARROW else None
             if narrowed is not None:
                 res.tests |= narrowed
+                res.medium |= narrowed
                 res.notes.append(f"{path}:{ln} attr-narrowed {qual}")
             else:
                 res.tests |= self.recv(f"{module}:{qual}")
-            res.tests |= self._class_methods_cov(path, qual)
+                res.tests |= self._class_methods_cov(path, qual)
             if tree == "old" and cls_node is not None:
                 res.tests |= self.collect_lines(path, range(cls_node.lineno, (cls_node.end_lineno or cls_node.lineno) + 1))
             res.tests |= self._test_class(module, qual)
@@ -346,7 +387,12 @@ class Analyzer:
             if n in imp:
                 return None
             todo.extend(self.m["aliases"].get(n, ()))
-        users = self._name_users(seen)
+        nl = self.m.get("name_line_users")
+        users = 0
+        for n in seen:
+            sid = (nl if nl is not None else self.m["name_users"]).get(n)
+            if sid is not None:
+                users |= self.sets[sid]
         if not users:
             return None
         return self.recv(f"{module}:{qual}") & users

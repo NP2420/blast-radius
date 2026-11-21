@@ -82,9 +82,10 @@ def local_cost(nums, ms) -> float:
 
 P_STRONG = float(os.environ.get("BR_P_STRONG", "0.30"))
 P_WEAK = float(os.environ.get("BR_P_WEAK", "0.01"))
+P_MEDIUM = float(os.environ.get("BR_P_MEDIUM", "0.15"))
 
 
-def plan(cands: list[int], ms: dict[int, int], strong: set | None = None) -> tuple[list[int], list[int]]:
+def plan(cands: list[int], ms: dict[int, int], strong: set | None = None, medium: set | None = None) -> tuple[list[int], list[int]]:
     """Split candidates into (include directly, run locally), minimising expected cost.
 
     Expected cost = packed cost of the included set
@@ -97,7 +98,8 @@ def plan(cands: list[int], ms: dict[int, int], strong: set | None = None) -> tup
     if NO_LOCAL:
         return list(cands), []
     strong = strong or set()
-    p = {n: (P_STRONG if n in strong else P_WEAK) for n in cands}
+    medium = medium or set()
+    p = {n: (P_STRONG if n in strong else P_MEDIUM if n in medium else P_WEAK) for n in cands}
     st = sorted((n for n in cands if n in strong), key=lambda n: -ms[n])
     wk = sorted((n for n in cands if n not in strong), key=lambda n: -ms[n])
 
@@ -234,6 +236,7 @@ def main() -> None:
             continue
         cands = set(unmapped) | bits_to_nums(res.tests, map_ids, num_by_id)
         strong = bits_to_nums(res.strong, map_ids, num_by_id)
+        medium = bits_to_nums(res.medium, map_ids, num_by_id)
         cond: list[int] = []
         if EQUIV and res.equiv and cands:
             # Swap with no semantic effect: probe with cheap candidates (strong first);
@@ -249,7 +252,7 @@ def main() -> None:
             inc, loc = [], probe
             res.notes.append(f"equiv: probe {len(probe)}, conditional {len(cond)}")
         else:
-            inc, loc = plan(sorted(cands), ms, strong)
+            inc, loc = plan(sorted(cands), ms, strong, medium)
         decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")

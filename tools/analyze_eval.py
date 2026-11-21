@@ -21,7 +21,7 @@ for cid, lab in sorted(labels.items()):
     res = an.analyze(patchparse.parse(open(os.path.join(pdir, cid + ".patch")).read()))
     if res.broad:
         st["broad"] += 1; continue
-    c = bits(res.tests); s = bits(res.strong); w = c - s
+    c = bits(res.tests | res.import_heur); s = bits(res.strong); w = c - s
     miss = fail - c
     if miss: misses.append((cid, kinds.get(cid, "?"), sorted(miss)[:4], res.notes[:2]))
     st["commits"] += 1; st["fail_commits"] += bool(fail)

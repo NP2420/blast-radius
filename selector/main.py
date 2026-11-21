@@ -104,7 +104,7 @@ P_MEDIUM = float(os.environ.get("BR_P_MEDIUM", "0.15"))
 P_BY_SIZE = os.environ.get("BR_P_BY_SIZE", "1") == "1"
 
 
-P_SCALE = float(os.environ.get("BR_P_SCALE", "0.4"))
+P_SCALE = float(os.environ.get("BR_P_SCALE", "0.6"))
 
 
 P_SCALE_FILE = os.environ.get("BR_P_SCALE_FILE", "1.0")
@@ -345,6 +345,10 @@ def main() -> None:
             saved_local[n_] = LOCAL_MS.get(n_, ms[n_])
             LOCAL_MS[n_] = int(300 + saved_local[n_] * len(qs) / max(1, maps["task_cov"][tid]["n"]))
             res.notes.append(f"{tid.split('::')[-1]}: {len(qs)} queries")
+        forced = bits_to_nums(res.unverified, map_ids, num_by_id) & cands if res.unverified else set()
+        if forced:
+            cands -= forced
+            res.notes.append(f"{len(forced)} tests listed unverified (empty-registry path)")
         cond: list[int] = []
         # Hot-swappable commits that leave the executor and tests alone reuse the
         # parent's TPC tables: TestExecutor's class setup is nearly free there.
@@ -390,6 +394,8 @@ def main() -> None:
             else:
                 groups = None
             inc, loc = plan(sorted(cands), ms, strong, medium, pmap, groups)
+        if forced:
+            inc = sorted(set(inc) | forced)
         LOCAL_MS.update(saved_local)
         if saved_setup is not None:
             CLASS_SETUP_MS[EXEC_CLS] = saved_setup

@@ -36,6 +36,7 @@ PURE_INSERT = os.environ.get("BR_PURE_INSERT", "1") == "1"
 STRUCT = os.environ.get("BR_STRUCT", "1") == "1"
 SKIP_BLANK_PINS = os.environ.get("BR_SKIP_BLANK_PINS", "1") == "1"
 CMP_PROFILE = os.environ.get("BR_CMP_PROFILE", "1") == "1"
+RENAME_NOOP = os.environ.get("BR_RENAME_NOOP", "1") == "1"
 
 
 @dataclass
@@ -57,6 +58,7 @@ class Result:
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
     trees: dict = field(default_factory=dict)      # path -> (old AST, new AST), for hot-swap planning
+    unverified: int = 0                            # candidates a full-registry child cannot clear: list them
 
 
 class Analyzer:
@@ -311,6 +313,9 @@ class Analyzer:
         if _ast_same(old_tree, new_tree):
             res.notes.append(f"{path}: AST unchanged")
             return
+        if RENAME_NOOP and not path.startswith("sqlglot/typing/") and _locals_renamed_only(old_tree, new_tree):
+            res.notes.append(f"{path}: only local variables renamed")
+            return
         if CMP_PROFILE and path.startswith("sqlglot/") and self.m.get("cmp_sites"):
             if self._op_swap_tests(path, old_tree, new_tree, res):
                 return
@@ -359,6 +364,18 @@ class Analyzer:
                     if k[0] != "func":
                         self._import_time(path, module, k, new_idx, n, res, tree="new")
 
+        reg = self.m.get("regempty", {}).get(path)
+        if reg:
+            # Lines the dialect registry runs when it starts empty (as after
+            # tests/test_dialect_entry_points.py in one pytest process): the tests
+            # that reach them that way may fail only in that order.
+            for _, ln in targets:
+                sid = reg.get(ln)
+                if sid is not None:
+                    extra = self.sets[sid] & ~self.cov_lines(path, [ln])
+                    res.tests |= extra
+                    res.strong |= extra
+                    res.unverified |= extra
         for _, ln in targets:
             kind = old_idx.kind(ln)
             if kind[0] == "func":
@@ -594,8 +611,10 @@ class Analyzer:
         untrusted = self.sets[self.m["cmp_untrusted"]] if "cmp_untrusted" in self.m else 0
         tests = 0
         for ln, col, old_op, new_op in swaps:
-            site = f"{path}:{ln}:{col}"
-            if site not in self.m["cmp_sites"] or ln in imp or new_op not in _CMP_FAMILY.get(old_op, ()):
+            site = f"{path}:{ln}:{col}" + (":bool" if old_op == "Bool" else "")
+            if site not in self.m["cmp_sites"] or ln in imp:
+                return False
+            if old_op != "Bool" and new_op not in _CMP_FAMILY.get(old_op, ()):
                 return False
             sid = prof.get(site, {}).get(new_op)
             if sid is not None:
@@ -606,6 +625,11 @@ class Analyzer:
             tests |= line & untrusted
             tests |= self.collect_lines(path, [ln])
             res.strong_lines.append((path, [ln]))  # per-query narrowing of heavy tests
+            rsid = self.m.get("regempty", {}).get(path, {}).get(ln)
+            if rsid is not None:
+                extra = self.sets[rsid] & ~line
+                tests |= extra
+                res.unverified |= extra
         res.tests |= tests
         res.strong |= tests
         res.notes.append(f"{path}: {len(swaps)} operator swap(s), profile -> {bin(tests).count('1')} tests")
@@ -917,6 +941,67 @@ def _pure_func_insertion(old: ast.Module, new: ast.Module) -> list | None:
     return added or None
 
 
+_INTROSPECT = {"locals", "vars", "eval", "exec", "globals", "dir"}
+
+
+def _normalize_locals(fn: ast.AST) -> ast.AST | None:
+    """Copy of a function with its plain local variables renamed canonically, or None
+    when renaming could be observable (introspection, closures, global/nonlocal)."""
+    import copy
+    params = {a.arg for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs}
+    params |= {a.arg for a in (fn.args.vararg, fn.args.kwarg) if a is not None}
+    stored, order = set(), []
+    for n in ast.walk(fn):
+        if n is not fn and isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            return None
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            return None
+        if isinstance(n, ast.Name):
+            if n.id in _INTROSPECT or n.id in ("super", "__class__"):
+                return None
+            if isinstance(n.ctx, ast.Store) and n.id not in params:
+                stored.add(n.id)
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and n.id in stored and n.id not in order:
+            order.append(n.id)
+    mapping = {name: f"_L{i}" for i, name in enumerate(order)}
+    fn2 = copy.deepcopy(fn)
+    for n in ast.walk(fn2):
+        if isinstance(n, ast.Name) and n.id in mapping:
+            n.id = mapping[n.id]
+    return fn2
+
+
+def _locals_renamed_only(old: ast.Module, new: ast.Module) -> bool:
+    """True when the modules differ only inside functions, and each differing function
+    is identical after canonical renaming of its plain local variables."""
+    found = []
+
+    def same(a, b):
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _ast_same(a, b):
+                return True
+            if a.name != b.name:
+                return False
+            na, nb = _normalize_locals(a), _normalize_locals(b)
+            if na is None or nb is None or not _ast_same(na, nb):
+                return False
+            found.append(a.name)
+            return True
+        if isinstance(a, ast.AST):
+            return all(same(getattr(a, f, None), getattr(b, f, None)) for f in a._fields)
+        if isinstance(a, list):
+            return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
+        return a == b
+
+    try:
+        return same(old, new) and bool(found)
+    except RecursionError:
+        return False
+
+
 _RICH = ("Eq", "NotEq", "Lt", "LtE", "Gt", "GtE")
 _CMP_FAMILY = {
     "Eq": [o for o in _RICH if o != "Eq"] + ["Is", "IsNot"],
@@ -938,6 +1023,11 @@ def _op_swaps(old: ast.AST, new: ast.AST) -> list | None:
             return False
         if isinstance(a, ast.AST):
             d = depth + isinstance(a, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+            if isinstance(a, ast.BoolOp) and len(a.values) == 2 == len(b.values) and type(a.op) is not type(b.op):
+                if depth == 0:
+                    return False
+                out.append((a.lineno, a.col_offset, "Bool", "BoolSwap"))
+                return all(same(x, y, d) for x, y in zip(a.values, b.values))
             if isinstance(a, ast.Compare) and len(a.ops) == 1 == len(b.ops) and type(a.ops[0]) is not type(b.ops[0]):
                 if depth == 0:
                     return False

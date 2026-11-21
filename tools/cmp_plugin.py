@@ -79,6 +79,75 @@ def br_cmp__(site, op, a, b):
 builtins.br_cmp__ = br_cmp__
 
 
+def br_bool__(site, is_and, fa, fb, pure_b):
+    """`a and b` / `a or b` with the swapped operator's result compared by identity."""
+    a = fa()
+    ta = bool(a)
+    b_val = _MISSING
+    if is_and:
+        r = fb() if ta else a
+        if ta:
+            b_val = r
+    else:
+        r = a if ta else fb()
+        if not ta:
+            b_val = r
+    if _REC[0] and site not in _DONE:
+        # swapped: and -> or gives (a if a else b); or -> and gives (b if a else a)
+        need_b = (is_and and not ta) or (not is_and and ta)
+        if need_b and b_val is _MISSING:
+            if not pure_b:
+                _UNKNOWN.add(site)
+                _DONE.add(site)
+                return r
+            try:
+                b_val = fb()
+            except Exception:
+                _DIFF.add((site, "BoolSwap"))
+                _DONE.add(site)
+                return r
+        alt = (a if ta else b_val) if is_and else (b_val if ta else a)
+        if alt is not r:
+            _DIFF.add((site, "BoolSwap"))
+            _DONE.add(site)
+    return r
+
+
+_MISSING = object()
+builtins.br_bool__ = br_bool__
+
+_PURE_CALLS = {"isinstance", "len", "type"}
+
+
+def _pure(node) -> bool:
+    if isinstance(node, (ast.Constant, ast.Name)):
+        return True
+    if isinstance(node, ast.Attribute):
+        return _pure(node.value)
+    if isinstance(node, ast.Compare):
+        return _pure(node.left) and all(_pure(c) for c in node.comparators)
+    if isinstance(node, ast.UnaryOp):
+        return _pure(node.operand)
+    if isinstance(node, ast.BoolOp):
+        return all(_pure(v) for v in node.values)
+    if isinstance(node, ast.Subscript):
+        return _pure(node.value) and _pure(node.slice)
+    if isinstance(node, ast.Tuple):
+        return all(_pure(e) for e in node.elts)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _PURE_CALLS:
+        return not node.keywords and all(_pure(a) for a in node.args)
+    return False
+
+
+def _lambda_safe(node) -> bool:
+    for n in ast.walk(node):
+        if isinstance(n, (ast.Yield, ast.YieldFrom, ast.Await, ast.NamedExpr)):
+            return False
+        if isinstance(n, ast.Name) and n.id in ("super", "__class__", "locals", "vars"):
+            return False  # zero-argument super() and frame introspection break inside a lambda
+    return True
+
+
 class _Rewrite(ast.NodeTransformer):
     def __init__(self, rel):
         self.rel = rel
@@ -91,6 +160,19 @@ class _Rewrite(ast.NodeTransformer):
         return node
 
     visit_FunctionDef = visit_AsyncFunctionDef = visit_Lambda = _scope
+
+    def visit_BoolOp(self, node):
+        node = self.generic_visit(node)
+        if self.depth == 0 or len(node.values) != 2 or not all(_lambda_safe(v) for v in node.values):
+            return node
+        site = f"{self.rel}:{node.lineno}:{node.col_offset}:bool"
+        _SITES.add(site)
+        lam = lambda e: ast.Lambda(args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]), body=e)  # noqa: E731
+        call = ast.Call(func=ast.Name(id="br_bool__", ctx=ast.Load()),
+                        args=[ast.Constant(site), ast.Constant(isinstance(node.op, ast.And)),
+                              lam(node.values[0]), lam(node.values[1]), ast.Constant(_pure(node.values[1]))],
+                        keywords=[])
+        return ast.copy_location(call, node)
 
     def visit_Compare(self, node):
         node = self.generic_visit(node)

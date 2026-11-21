@@ -4,6 +4,7 @@ usage: mutate.py REPO OUT_DIR N SEED
 Writes OUT_DIR/<id>.patch and OUT_DIR/kinds.json ({id: kind}).
 """
 import ast
+import os
 import difflib
 import json
 import random
@@ -281,6 +282,130 @@ class Mutator:
         return None
 
 
+def novel(m: "Mutator"):
+    """Kinds of change the sample set never had."""
+    rng = m.rng
+    k = rng.choice(["default_arg", "new_func", "helper_edit", "fixture_delete", "multi_hunk", "typing_edit", "decorator_wrap",
+                    "base_change", "import_remove", "import_alias"])
+    if k == "base_change":
+        for _ in range(40):
+            p = rng.choices(m.py, m.weights)[0]; src = p.read_text(); tree = ast.parse(src); lines = src.split("\n")
+            cls = [c for c in ast.walk(tree) if isinstance(c, ast.ClassDef) and len(c.bases) == 1 and c.lineno == c.bases[0].end_lineno]
+            if not cls:
+                continue
+            c = rng.choice(cls); b0 = c.bases[0]; line = lines[c.lineno - 1]
+            seg = line[b0.col_offset:b0.end_col_offset]
+            if "." in seg:
+                new = seg.rsplit(".", 1)[0] + ".Expression" if seg.startswith("exp.") else None
+            else:
+                new = "object" if seg != "object" else None
+            if not new or new == seg:
+                continue
+            lines[c.lineno - 1] = line[:b0.col_offset] + new + line[b0.end_col_offset:]
+            return m.rel(p), src, "\n".join(lines), "novel:base_change"
+    if k in ("import_remove", "import_alias"):
+        for _ in range(40):
+            p = rng.choices(m.py, m.weights)[0]; src = p.read_text(); tree = ast.parse(src); lines = src.split("\n")
+            imps = [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.lineno == n.end_lineno and len(n.names) >= 2
+                    and n.module and not n.module.startswith("__")]
+            if not imps:
+                continue
+            n = rng.choice(imps); line = lines[n.lineno - 1]
+            names = [a.name + (f" as {a.asname}" if a.asname else "") for a in n.names]
+            i = rng.randrange(len(names))
+            if k == "import_remove":
+                rest = names[:i] + names[i + 1:]
+            else:
+                a0 = n.names[i]
+                if a0.asname:
+                    continue
+                rest = names[:i] + [f"{a0.name} as {a0.name}_alias"] + names[i + 1:]
+            lines[n.lineno - 1] = f"from {'.' * n.level}{n.module} import {', '.join(rest)}"
+            nsrc = "\n".join(lines)
+            try:
+                ast.parse(nsrc)
+            except SyntaxError:
+                continue
+            return m.rel(p), src, nsrc, "novel:" + k
+    repo = m.repo
+    if k == "default_arg":
+        for _ in range(40):
+            p = rng.choices(m.py, m.weights)[0]
+            src = p.read_text(); tree = ast.parse(src); lines = src.split("\n")
+            fns = [f for f in ast.walk(tree) if isinstance(f, ast.FunctionDef) and f.args.defaults
+                   and all(d.lineno == d.end_lineno for d in f.args.defaults)]
+            if not fns:
+                continue
+            f = rng.choice(fns); d = rng.choice(f.args.defaults)
+            if not isinstance(d, ast.Constant):
+                continue
+            line = lines[d.lineno - 1]; seg = line[d.col_offset:d.end_col_offset]
+            v = d.value
+            new = "True" if v is False else "False" if v is True else "1" if v is None else repr(v + 1) if isinstance(v, int) else None
+            if new is None:
+                continue
+            lines[d.lineno - 1] = line[:d.col_offset] + new + line[d.end_col_offset:]
+            return m.rel(p), src, "\n".join(lines), "novel:default_arg"
+    if k == "new_func":
+        p = rng.choices(m.py, m.weights)[0]; src = p.read_text()
+        return m.rel(p), src, src.rstrip("\n") + "\n\n\ndef _unused_helper(x):\n    return x\n", "novel:new_func"
+    if k == "helper_edit":
+        for _ in range(30):
+            p = rng.choice([repo / "tests/helpers.py", repo / "tests/dialects/test_dialect.py"])
+            src = p.read_text(); lines = src.split("\n"); tree = ast.parse(src)
+            cmps = [n for n in ast.walk(tree) if isinstance(n, (ast.Compare, ast.BoolOp, ast.Constant)) and n.lineno == n.end_lineno]
+            if not cmps:
+                continue
+            n = rng.choice(cmps)
+            new = m._edit("compare" if isinstance(n, ast.Compare) else "boolop" if isinstance(n, ast.BoolOp) else "const", n, lines[n.lineno - 1])
+            if not new or new == lines[n.lineno - 1]:
+                continue
+            lines[n.lineno - 1] = new
+            nsrc = "\n".join(lines)
+            try:
+                ast.parse(nsrc)
+            except SyntaxError:
+                continue
+            return m.rel(p), src, nsrc, "novel:helper_edit"
+    if k == "fixture_delete":
+        p = rng.choice(m.fixtures); src = p.read_text(); lines = src.split("\n")
+        idx = [i for i, l in enumerate(lines) if l.strip()]
+        if idx:
+            i = rng.choice(idx)
+            return m.rel(p), src, "\n".join(lines[:i] + lines[i + 1:]), "novel:fixture_delete"
+    if k == "multi_hunk":
+        p = rng.choices(m.py, m.weights)[0]
+        r1 = m.code(path=p)
+        if r1:
+            src = r1[1]
+            tmp = r1[2]
+            # second edit in the same file, far away
+            p.write_text(tmp)
+            try:
+                r2 = m.code(path=p)
+            finally:
+                p.write_text(src)
+            if r2 and r2[2] != tmp:
+                return m.rel(p), src, r2[2], "novel:multi_hunk"
+    if k == "typing_edit":
+        ps = sorted((repo / "sqlglot/typing").glob("*.py"))
+        r = m.code(path=rng.choice(ps))
+        if r:
+            return r[0], r[1], r[2], "novel:typing_edit"
+    if k == "decorator_wrap":
+        for _ in range(30):
+            p = rng.choices(m.py, m.weights)[0]; src = p.read_text(); lines = src.split("\n"); tree = ast.parse(src)
+            fns = [f for f in ast.walk(tree) if isinstance(f, ast.FunctionDef) and not f.decorator_list and f.col_offset == 0]
+            if not fns:
+                continue
+            f = rng.choice(fns)
+            if "import functools" not in src:
+                continue
+            lines.insert(f.lineno - 1, "@functools.lru_cache(maxsize=None)")
+            return m.rel(p), src, "\n".join(lines), "novel:decorator_wrap"
+    return None
+
+
 def main() -> None:
     repo, out, n, seed = Path(sys.argv[1]), Path(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
     out.mkdir(parents=True, exist_ok=True)
@@ -288,7 +413,7 @@ def main() -> None:
     m = Mutator(repo, rng)
     plan = (["code"] * 40 + ["fixture"] * 18 + ["comment"] * 8 + ["multi"] * 8 + ["table"] * 8
             + ["docstring"] * 3 + ["fixture_comment"] * 4 + ["test_edit"] * 5 + ["unused_import"] * 3
-            + ["whitespace"] * 3)
+            + ["whitespace"] * 3 + ["novel"] * int(os.environ.get("MUT_NOVEL", "0")))
     kinds = json.loads((out / "kinds.json").read_text()) if (out / "kinds.json").exists() else {}
     made = 0
     while made < n:
@@ -312,6 +437,8 @@ def main() -> None:
             edits = [m.unused_import()]
         elif k == "whitespace":
             edits = [m.whitespace()]
+        elif k == "novel":
+            edits = [novel(m)]
         elif k == "multi":
             parts = rng.sample(["code", "comment", "fixture", "table"], rng.choice([2, 3]))
             fn = {"code": m.code, "comment": m.comment, "fixture": m.fixture, "table": m.table_entry}

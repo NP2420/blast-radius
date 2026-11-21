@@ -16,6 +16,7 @@ from patchparse import ApplyError, FileDiff, apply
 INERT_PREFIXES = ("benchmarks/", "posts/", "pdoc/", "docs/", ".github/", "sqlglot-integration-tests/")
 INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
+KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
 
 
 @dataclass
@@ -29,6 +30,7 @@ class Result:
     import_heur: int = 0                           # import-time candidates by heuristics (used if no fingerprint)
     fp_func: bool = False                          # function code that also runs at import changed
     equiv: bool = False                            # every code change is an is/== swap against None/enum
+    key_attrs: set = field(default_factory=set)    # tables edited at key level (expected to differ in fingerprint)
     broad: str | None = None                       # reason, if we must run everything
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
@@ -191,7 +193,11 @@ class Analyzer:
         try:
             old_tree = ast.parse(old)
             new_tree = ast.parse(new)
-        except SyntaxError:
+            # Full compile: catches errors ast.parse accepts (misplaced __future__
+            # imports, return outside function, bad nonlocal...). Such a module
+            # cannot be imported at all.
+            compile(new, path, "exec", dont_inherit=True)
+        except (SyntaxError, ValueError):
             res.broad = f"syntax error {path}"
             return
         # Text readers of the source (inspect.getsource, subprocess tools).
@@ -305,6 +311,17 @@ class Analyzer:
         if k == "class":
             qual = kind[2]
             cls_node = kind[1]
+            keyed = self._key_narrow(idx, ln) if KEY_NARROW and tree in ("old", "new") and path.startswith("sqlglot/") else None
+            if keyed is not None:
+                res.tests |= keyed
+                res.medium |= keyed
+                # Guard: the patched import may change other state through this table
+                # (copies under other names, derived tables, values parsed at import).
+                res.key_attrs.add(self._last_key_attr)
+                res.import_fp = True
+                res.fp_func = True
+                res.notes.append(f"{path}:{ln} key-narrowed {qual}.{self._last_key_attr}")
+                return
             narrowed = self._attr_narrow(module, qual, idx.names_assigned(ln)) if ATTR_NARROW else None
             if narrowed is not None:
                 res.tests |= narrowed
@@ -371,6 +388,52 @@ class Analyzer:
         bits |= self._name_users({name})
         bits |= self.recv(f"{module}:{name}")  # a module-level class object itself
         return bits
+
+    def _key_narrow(self, idx, ln) -> int | None:
+        """Tests that looked up the edited entry's key in its class table.
+
+        Applies to a single dict entry of an UPPERCASE class attribute. None when the
+        table is read by import-time function code, copied under another name, or the
+        key is read with a constant at import (derived values), or the entry key is
+        not a literal we can name.
+        """
+        ku = self.m.get("key_users")
+        if not ku or len(self.m["tests"]) != self.m.get("key_tests", 0):
+            return None
+        node = idx.stmt_at(ln)
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or not isinstance(node.value, ast.Dict):
+            return None
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name) or not targets[0].id.isupper():
+            return None
+        attr = targets[0].id
+        d = node.value
+        entry = None
+        for k, v in zip(d.keys, d.values):
+            a0 = (k or v).lineno
+            b0 = max(getattr(k, "end_lineno", a0) or a0, getattr(v, "end_lineno", a0) or a0)
+            if a0 <= ln <= b0:
+                entry = k
+                break
+        if entry is None:  # the line is not inside one entry (braces, spread, comment between entries)
+            return None
+        if isinstance(entry, ast.Constant) and isinstance(entry.value, str):
+            key = "str:" + entry.value
+        elif isinstance(entry, ast.Attribute):
+            base = entry.value
+            base_name = base.attr if isinstance(base, ast.Attribute) else base.id if isinstance(base, ast.Name) else ""
+            key = (f"enum:{base_name}.{entry.attr}" if entry.attr.isupper() else f"type:{entry.attr}")
+        else:
+            return None
+        if f"{attr}|{key}" in self.m.get("import_const_keys", set()):
+            return None
+        out = 0
+        for k in (f"{attr}|{key}", f"{attr}|*"):
+            sid = ku.get(k)
+            if sid is not None:
+                out |= self.sets[sid]
+        self._last_key_attr = attr
+        return out
 
     def _alias_closure(self, names: set) -> set:
         todo, seen = list(names), set()

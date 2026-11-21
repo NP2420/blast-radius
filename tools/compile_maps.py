@@ -175,6 +175,8 @@ def main() -> None:
     # including string constants passed to getattr), and aliases created by
     # class-body / module-level assignments (FOO = Parent.BAR makes BAR -> FOO).
     import_ref_names: set = set()
+    import_func_refs: set = set()
+    import_const_keys: set = set()   # "ATTR|str:KEY" subscripted/get with a constant at module/class level
     aliases: dict[str, set] = {}
     for py in Path(repo, "sqlglot").rglob("*.py"):
         rel = str(py.relative_to(repo))
@@ -201,7 +203,17 @@ def main() -> None:
                     lines = range(node.body[0].lineno, (node.end_lineno or node.lineno) + 1)
                     if any(l in il for l in lines):
                         import_ref_names.update(names_in(node))
+                        import_func_refs.update(names_in(node))
                     continue
+                if not in_func:
+                    for sub in ast.walk(node):
+                        if isinstance(sub, ast.Subscript) and isinstance(sub.value, ast.Attribute) \
+                                and isinstance(sub.slice, ast.Constant) and isinstance(sub.slice.value, str):
+                            import_const_keys.add(f"{sub.value.attr}|str:{sub.slice.value}")
+                        if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) and sub.func.attr == "get" \
+                                and isinstance(sub.func.value, ast.Attribute) and sub.args \
+                                and isinstance(sub.args[0], ast.Constant) and isinstance(sub.args[0].value, str):
+                            import_const_keys.add(f"{sub.func.value.attr}|str:{sub.args[0].value}")
                 if isinstance(node, ast.ClassDef):
                     scan(node.body, False)
                     continue
@@ -341,6 +353,8 @@ def main() -> None:
         "name_users": {k: sid(b) for k, b in name_bits.items()},
         "attr_refs": {k: sid(b) for k, b in attr_bits.items() if b},
         "import_ref_names": import_ref_names,
+        "import_func_refs": import_func_refs,
+        "import_const_keys": import_const_keys,
         "name_line_users": {k: sid(b) for k, b in name_line_bits.items()},
         "aliases": {k: sorted(v) for k, v in aliases.items() if v},
         "funcs": funcs,
@@ -394,6 +408,20 @@ def main() -> None:
                     if (path, ln) in lines_needed:
                         pos.setdefault(nm, set()).add((path, ln))
         maps["task_name_pos"] = pos
+    if len(sys.argv) > 7 and os.path.isdir(sys.argv[7]):
+        key_bits: dict[str, int] = {}
+        nkeys = 0
+        for f in glob.glob(os.path.join(sys.argv[7], "*.json")):
+            d = json.loads(Path(f).read_text())
+            n_ = idx.get(d["nodeid"])
+            if n_ is None:
+                continue
+            nkeys += 1
+            for k in d["keys"]:
+                key_bits[k] = key_bits.get(k, 0) | (1 << n_)
+        maps["key_users"] = {k: sid(b_) for k, b_ in key_bits.items()}
+        maps["key_tests"] = nkeys
+        print(f"key map: {nkeys} tests, {len(key_bits)} keys", file=sys.stderr)
     maps["sets"] = sets
     with open(out, "wb") as f:
         pickle.dump(maps, f, protocol=5)

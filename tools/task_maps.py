@@ -1,17 +1,19 @@
 """Per-query coverage for heavy executor tests (tpcds): which queries run which lines.
 
 usage: task_maps.py REPO OUT_JSON
-Runs TestExecutor.test_execute_tpcds in-process (syncpool) under coverage and
-switches context per query: "pre<i>" (parse before submit), "task<i>" (pool task),
-"cmp<i>" (comparison in subtestHelper). Everything else is "rest". lru caches
-are cleared before every task so one query's cache cannot hide another's
-dependency. Output: {test_id: {"n": N, "rest": {path: [lines]},
-                               "q": {path: {line: [query indices]}}}}
+
+Each pool task (one query) runs in its own forked process with a fresh coverage
+tracer, starting from the parent's state, where no other task has run. So no
+query can hide a dependency behind a cache another query filled, which matches
+real pool workers (separate processes). Everything the test process does itself
+(parsing every query, comparisons, setup) is "rest": a change there means the
+test must run whole.
+
+Output: {test_id: {"n": N, "rest": {path: [lines]}, "q": {path: {line: [query indices]}}}}
 """
-import functools
-import gc
 import json
 import os
+import pickle
 import sys
 import unittest
 
@@ -20,61 +22,63 @@ sys.path[:0] = [repo, os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 os.chdir(repo)
 os.environ["SKIP_INTEGRATION"] = "0"
 import coverage  # noqa: E402
-
-cov = coverage.Coverage(data_file=None, source=[os.path.join(repo, "sqlglot")])
 import syncpool  # noqa: E402
 
 syncpool.install()
 import tests.test_executor as TE  # noqa: E402
 
+SRC = os.path.join(repo, "sqlglot")
+task_lines: dict[int, dict[str, list]] = {}
 state = {"i": 0}
 
 
-def clear_caches():
-    for obj in gc.get_objects():
-        if isinstance(obj, functools._lru_cache_wrapper):
-            mod = getattr(obj, "__module__", "") or ""
-            if mod.startswith("sqlglot"):
-                obj.cache_clear()
-
-
-orig_submit = syncpool.SyncExecutor.submit
-
-
 def submit(self, fn, /, *args, **kwargs):
+    import concurrent.futures as cf
     i = state["i"]
-    clear_caches()
-    cov.switch_context(f"task{i}")
-    try:
-        return orig_submit(self, fn, *args, **kwargs)
-    finally:
-        state["i"] = i + 1
-        cov.switch_context(f"pre{i + 1}")
+    state["i"] = i + 1
+    fut = cf.Future()
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            os.environ["COVERAGE_CORE"] = "sysmon"
+            cov = coverage.Coverage(data_file=None, source=[SRC])
+            cov.start()
+            try:
+                fn_, a_, k_ = pickle.loads(pickle.dumps((fn, args, kwargs)))
+                res = (True, fn_(*a_, **k_))
+            except BaseException as e:  # noqa: BLE001
+                res = (False, e)
+            cov.stop()
+            data = cov.get_data()
+            lines = {os.path.relpath(f, repo): sorted(data.lines(f) or []) for f in data.measured_files()}
+            payload = pickle.dumps((res, lines))
+        except BaseException as e:  # noqa: BLE001
+            payload = pickle.dumps(((False, RuntimeError(repr(e))), {}))
+        with os.fdopen(w, "wb") as fh:
+            fh.write(payload)
+        os._exit(0)
+    os.close(w)
+    with os.fdopen(r, "rb") as fh:
+        payload = fh.read()
+    os.waitpid(pid, 0)
+    (ok, val), lines = pickle.loads(payload)
+    task_lines[i] = lines
+    if ok:
+        fut.set_result(val)
+    else:
+        fut.set_exception(val)
+    return fut
 
 
 syncpool.SyncExecutor.submit = submit
-orig_helper = TE.TestExecutor.subtestHelper
-
-
-def helper(self, i, table, tpch=True):
-    cov.switch_context(f"cmp{i}")
-    try:
-        return orig_helper(self, i, table, tpch=tpch)
-    finally:
-        cov.switch_context("rest")
-
-
-TE.TestExecutor.subtestHelper = helper
 orig_mp = TE.TestExecutor._mp_execute
 
 
 def mp(self, *a, **k):
     state["i"] = 0
-    cov.switch_context("pre0")
-    try:
-        return orig_mp(self, *a, **k)
-    finally:
-        cov.switch_context("rest")
+    return orig_mp(self, *a, **k)
 
 
 TE.TestExecutor._mp_execute = mp
@@ -82,28 +86,22 @@ TE.TestExecutor._mp_execute = mp
 result = {}
 for name in ("test_execute_tpcds",):
     tid = f"tests/test_executor.py::TestExecutor::{name}"
+    os.environ["COVERAGE_CORE"] = "ctrace"
+    parent_cov = coverage.Coverage(data_file=None, source=[SRC])
+    parent_cov.start()  # setup + everything the test process itself runs
     TE.TestExecutor.setUpClass()
-    cov.erase()
-    cov.start()
-    cov.switch_context("rest")
-    r = unittest.TestResult()
-    TE.TestExecutor(name).run(r)
-    cov.stop()
+    r_ = unittest.TestResult()
+    TE.TestExecutor(name).run(r_)
     TE.TestExecutor.tearDownClass()
-    print(name, "errors", len(r.errors), "failures", len(r.failures), file=sys.stderr)
-    data = cov.get_data()
-    rest: dict = {}
+    parent_cov.stop()
+    print(name, "errors", len(r_.errors), "failures", len(r_.failures), "tasks", state["i"], file=sys.stderr)
+    data = parent_cov.get_data()
+    rest = {os.path.relpath(f, repo): sorted(data.lines(f) or []) for f in data.measured_files()}
     q: dict = {}
-    nq = state["i"]
-    for f in data.measured_files():
-        rel = os.path.relpath(f, repo)
-        for ln, ctxs in data.contexts_by_lineno(f).items():
-            for c in ctxs:
-                if c in ("rest", ""):
-                    rest.setdefault(rel, set()).add(ln)
-                else:
-                    idx = int(c.lstrip("pretaskcmp"))
-                    q.setdefault(rel, {}).setdefault(ln, set()).add(idx)
-    result[tid] = {"n": nq, "rest": {k: sorted(v) for k, v in rest.items()},
-                   "q": {k: {ln: sorted(v) for ln, v in d.items()} for k, d in q.items()}}
+    for i, lines in task_lines.items():
+        for path, ls in lines.items():
+            d = q.setdefault(path, {})
+            for ln in ls:
+                d.setdefault(ln, []).append(i)
+    result[tid] = {"n": state["i"], "rest": rest, "q": q}
 json.dump(result, open(out, "w"))

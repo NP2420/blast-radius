@@ -31,8 +31,11 @@ MAPS = os.environ.get("BR_MAPS", str(HERE.parent / "maps" / "maps.pkl"))
 FP_BASE = os.environ.get("BR_FP_BASE", str(Path(MAPS).parent / "fp_base.pkl"))
 FP_NARROW = os.environ.get("BR_FP_NARROW", "0") == "1"
 EQUIV = os.environ.get("BR_EQUIV", "1") == "1"
+# Heavy tests (>= HEAVY_MS) are listed only with strong evidence (diagnostic / policy).
+DROP_WEAK_HEAVY = os.environ.get("BR_DROP_WEAK_HEAVY", "0") == "1"
+HEAVY_MS = int(os.environ.get("BR_HEAVY_MS", "1000"))
 EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "500"))
-# Per-query runs of heavy executor tests (tpcds). Off while a practice miss is isolated.
+# Per-query runs of heavy executor tests (tpcds); off by default.
 TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "0") == "1"
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
@@ -213,6 +216,10 @@ def main() -> None:
             fp = {c: ["<no baseline>"] for c, _ in fp_jobs}
         for c, changed in fp.items():
             r = analyses[c]
+            if r.key_attrs and not any(k.startswith("<") or k.startswith("global:") for k in changed):
+                # The edited table (and same-name copies in subclasses) must differ;
+                # anything else that changed is a ripple to account for.
+                changed = [k for k in changed if k.rsplit(".", 1)[-1].rsplit(":", 1)[-1] not in r.key_attrs]
             if not changed:
                 r.notes.append("import state unchanged")
                 continue
@@ -239,6 +246,12 @@ def main() -> None:
         cands = set(unmapped) | bits_to_nums(res.tests, map_ids, num_by_id)
         strong = bits_to_nums(res.strong, map_ids, num_by_id)
         medium = bits_to_nums(res.medium, map_ids, num_by_id)
+        if DROP_WEAK_HEAVY:
+            dropped = [n for n in cands if ms[n] >= HEAVY_MS and n not in strong and n not in medium]
+            for n in dropped:
+                cands.discard(n)
+            if dropped:
+                res.notes.append(f"dropped {len(dropped)} non-strong heavy tests")
         # Heavy executor tests with per-query maps: run only the queries that can
         # observe the change (or drop the test when none can).
         allowed: dict = {}

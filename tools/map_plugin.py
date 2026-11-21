@@ -94,7 +94,13 @@ def pytest_configure(config):
     os.makedirs(os.path.join(OUT, "t"), exist_ok=True)
     sys.addaudithook(_audit)
     import coverage
+    # The parent switches contexts (sqlglot import vs. each file's collection):
+    # the sysmon core records a line only once per process, so use the exact
+    # C tracer here; children (one context each) keep the fast core.
+    child_core = os.environ.get("COVERAGE_CORE", "sysmon")
+    os.environ["COVERAGE_CORE"] = "ctrace"
     _parent_cov = coverage.Coverage(data_file=None, source=[ROOT + "sqlglot", ROOT + "tests"])
+    os.environ["COVERAGE_CORE"] = child_core
     _auditing[0] = True
     _parent_cov.start()
     # Phase 1: sqlglot's own import (module bodies, class bodies, metaclasses).

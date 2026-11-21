@@ -22,6 +22,8 @@ KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
 MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
 IMPORT_LOCAL = os.environ.get("BR_IMPORT_LOCAL", "1") == "1"
 CLASS_HEADER_NAME = os.environ.get("BR_CLASS_HEADER_NAME", "1") == "1"
+KEEP_TREES = os.environ.get("BR_KEEP_TREES", "0") == "1"
+PURE_INSERT = os.environ.get("BR_PURE_INSERT", "1") == "1"
 
 
 @dataclass
@@ -42,6 +44,7 @@ class Result:
     broad: str | None = None                       # reason, if we must run everything
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
+    trees: dict = field(default_factory=dict)      # path -> (old AST, new AST), for hot-swap planning
 
 
 class Analyzer:
@@ -216,6 +219,7 @@ class Analyzer:
             return
         # Text readers of the source (inspect.getsource, subprocess tools).
         res.tests |= self.opens(path)
+        res.trees[path] = (old_tree, new_tree) if KEEP_TREES else None
         if _ast_same(old_tree, new_tree):
             res.notes.append(f"{path}: AST unchanged")
             return
@@ -224,6 +228,19 @@ class Analyzer:
             res.notes.append(f"{path}: is/== swap")
         else:
             res.nonequiv_files = getattr(res, "nonequiv_files", 0) + 1
+
+        if PURE_INSERT and path.startswith("sqlglot/"):
+            added = _pure_func_insertion(old_tree, new_tree)
+            if added:
+                # Only new, unreferenced module-level functions: nothing can call them.
+                # The fingerprint still guards import-time effects (registries that
+                # scan module globals); lines below shift, so first-line numbers move.
+                res.tests |= self.m["proc_tests"]
+                res.import_fp = True
+                res.state_guard = True
+                res.key_attrs |= set(added) | {"__firstlineno__"}
+                res.notes.append(f"{path}: new functions {sorted(added)}")
+                return
 
         old_idx = _ScopeIndex(old_tree)
         new_idx = _ScopeIndex(new_tree)
@@ -727,6 +744,52 @@ class _SwapNorm(ast.NodeTransformer):
             ops.append(op)
         node.ops = ops
         return node
+
+
+def _top_names(tree: ast.Module) -> set:
+    names = set()
+    for node in tree.body:
+        for n in ast.walk(node):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                names.add(n.name)
+            elif isinstance(n, ast.Name):
+                names.add(n.id)
+            elif isinstance(n, ast.alias):
+                names.add((n.asname or n.name).split(".")[0])
+            elif isinstance(n, ast.Attribute):
+                names.add(n.attr)
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value.isidentifier():
+                names.add(n.value)
+    return names
+
+
+def _pure_func_insertion(old: ast.Module, new: ast.Module) -> list | None:
+    """Names of module-level functions the new tree only adds (no decorators, constant
+    or no defaults, no annotations, names unknown to the old file), else None."""
+    o, n = old.body, new.body
+    if len(n) <= len(o):
+        return None
+    known = _top_names(old)
+    added, i = [], 0
+    for node in n:
+        if i < len(o) and _ast_same(node, o[i]):
+            i += 1
+            continue
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.decorator_list:
+            return None
+        if node.name in known or node.returns is not None:
+            return None
+        a = node.args
+        if any(x.annotation is not None for x in a.posonlyargs + a.args + a.kwonlyargs):
+            return None
+        if any(x.annotation is not None for x in (a.vararg, a.kwarg) if x is not None):
+            return None
+        if any(not isinstance(d, ast.Constant) for d in a.defaults + [d for d in a.kw_defaults if d is not None]):
+            return None
+        added.append(node.name)
+    if i != len(o):
+        return None
+    return added or None
 
 
 _MUTATES = False  # set True if anything below ever mutates old_tree in place

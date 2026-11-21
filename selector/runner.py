@@ -34,6 +34,38 @@ def preload() -> None:
             pass
 
 
+import gc as _gc
+
+_GC_DEFAULT = _gc.get_threshold()  # captured at import, before main raises it
+
+
+def _child_gc() -> None:
+    _gc.set_threshold(*_GC_DEFAULT)
+
+
+_WARM = [False]
+
+
+def warm_import(repo: str) -> bool:
+    """Import pristine sqlglot (every module) in this process, for hot-swap children."""
+    if _WARM[0]:
+        return True
+    try:
+        sys.path.insert(0, repo)
+        try:
+            import fingerprint
+            fingerprint.import_all()
+        finally:
+            sys.path.remove(repo)
+        _WARM[0] = True
+    except Exception:
+        for name in list(sys.modules):
+            if name == "sqlglot" or name.startswith("sqlglot."):
+                del sys.modules[name]
+        _WARM[0] = False
+    return _WARM[0]
+
+
 def build_farm(repo: str, farm: str, patched: dict[str, str | None]) -> None:
     """Symlink farm of repo at farm, with patched files written for real."""
     if os.path.exists(farm):
@@ -105,11 +137,13 @@ class _Result(unittest.TestResult):
         os.write(self.out, (json.dumps(obj) + "\n").encode())
 
 
-def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int, allowed: dict | None = None) -> None:
+def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int, allowed: dict | None = None,
+           swaps: list | None = None) -> None:
     devnull = os.open(os.devnull, os.O_RDWR)
     os.dup2(devnull, 0)
     os.dup2(devnull, 1)
     os.dup2(devnull, 2)
+    _child_gc()
     try:
         build_farm(repo, farm, patched)
         os.chdir(farm)
@@ -117,9 +151,22 @@ def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int, a
         os.environ["PYTHONPATH"] = farm
         os.environ["SKIP_INTEGRATION"] = "0"
         sys.path[:] = [farm, _HERE] + [p for p in sys.path if p and os.path.realpath(p) != os.path.realpath(repo)]
-        for name in list(sys.modules):
-            if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
-                del sys.modules[name]
+        hot = False
+        if swaps is not None and _WARM[0]:
+            # Pristine sqlglot is already imported here: patch function code in place;
+            # tests (and their fixtures) come fresh from the farm.
+            for name in list(sys.modules):
+                if name == "tests" or name.startswith("tests."):
+                    del sys.modules[name]
+            try:
+                import hotswap
+                hot = hotswap.apply(swaps, sys.modules)
+            except Exception:
+                hot = False
+        if not hot:
+            for name in list(sys.modules):
+                if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
+                    del sys.modules[name]
         importlib.invalidate_caches()
         _run_tests(wfd, test_ids, allowed)
     except BaseException:
@@ -188,7 +235,8 @@ class LocalRunner:
         Tests with no entry when the budget runs out are unknown (caller includes them).
         """
         results: dict[str, dict[str, bool]] = {j[0]: {} for j in jobs}
-        pending = [(j[0], j[1], list(j[2])) + ((j[3],) if len(j) > 3 else ()) for j in jobs if j[2]]
+        pending = [(j[0], j[1], list(j[2]), j[3] if len(j) > 3 else None, j[4] if len(j) > 4 else None)
+                   for j in jobs if j[2]]
         active: dict[int, dict] = {}  # rfd -> state
         stop_at = time.monotonic() + budget_s
         while pending or active:
@@ -206,7 +254,7 @@ class LocalRunner:
                 break
             while pending and len(active) < parallel:
                 job = pending.pop(0)
-                self._spawn(active, job[0], job[1], job[2], job[3] if len(job) > 3 else None)
+                self._spawn(active, job[0], job[1], job[2], job[3], job[4])
             fds = list(active)
             now = time.monotonic()
             timeout = max(0.0, min(min(st["deadline"] for st in active.values()), stop_at) - now)
@@ -240,16 +288,17 @@ class LocalRunner:
                     self._finish(active, fd, results, pending, eof=False)
         return results
 
-    def _spawn(self, active, commit, patched, tids, allowed=None):
+    def _spawn(self, active, commit, patched, tids, allowed=None, swaps=None):
         rfd, wfd = os.pipe()
         farm = os.path.join(self.tmp, f"w_{commit}_{len(tids)}_{int(time.monotonic() * 1000) % 100000}")
         pid = os.fork()
         if pid == 0:
             os.close(rfd)
-            _child(self.repo, farm, patched, tids, wfd, allowed)
+            _child(self.repo, farm, patched, tids, wfd, allowed, swaps)
         os.close(wfd)
         # First test also absorbs import time.
         active[rfd] = {"pid": pid, "commit": commit, "patched": patched, "left": list(tids), "allowed": allowed,
+                       "swaps": swaps,
                        "buf": b"", "farm": farm,
                        "deadline": time.monotonic() + 15.0 + self.limit(tids[0])}
 
@@ -275,7 +324,7 @@ class LocalRunner:
             results[st["commit"]][bad] = True
             self.log(f"{st['commit']}: {bad} {'crashed' if eof else 'timed out'}")
             if left[1:]:
-                pending.insert(0, (st["commit"], st["patched"], left[1:], st.get("allowed")))
+                pending.insert(0, (st["commit"], st["patched"], left[1:], st.get("allowed"), st.get("swaps")))
 
 
 def _fp_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int) -> None:
@@ -283,6 +332,7 @@ def _fp_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int) -> 
     os.dup2(devnull, 0)
     os.dup2(devnull, 1)
     os.dup2(devnull, 2)
+    _child_gc()
     out = ["<error>"]
     try:
         build_farm(repo, farm, patched)
@@ -371,6 +421,7 @@ def _fp_test_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int
     os.dup2(devnull, 0)
     os.dup2(devnull, 1)
     os.dup2(devnull, 2)
+    _child_gc()
     try:
         out = ["<error>"]
         try:

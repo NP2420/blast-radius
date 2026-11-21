@@ -23,7 +23,8 @@ sys.path.insert(0, str(HERE))
 
 import analyze  # noqa: E402
 import patchparse  # noqa: E402
-from runner import LocalRunner, fp_then_tests, preload  # noqa: E402
+from runner import LocalRunner, fp_then_tests, preload, warm_import  # noqa: E402
+import hotswap  # noqa: E402
 
 DATA = Path(os.environ.get("BR_DATA", "/data"))
 REPO = os.environ.get("BR_REPO", "/opt/sqlglot")
@@ -41,6 +42,7 @@ TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
 LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "150"))
 CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.5"))
+HOT = os.environ.get("BR_HOT", "1") == "1"
 LOCAL_BUDGET_S = float(os.environ.get("BR_LOCAL_BUDGET_S", "110"))
 NO_LOCAL = os.environ.get("BR_NO_LOCAL") == "1"
 T0 = time.monotonic()
@@ -204,6 +206,12 @@ def main() -> None:
 
     with open(MAPS, "rb") as f:
         maps = pickle.load(f)
+    import gc
+    gc.freeze()  # the maps are permanent: keep the cycle collector from rescanning them
+    # Analysis allocates millions of short-lived AST nodes: collect cycles rarely here.
+    # (Test children restore the default thresholds.)
+    if os.environ.get("BR_GC_THRESH"):
+        gc.set_threshold(int(os.environ["BR_GC_THRESH"]), 50, 50)
     map_ids = maps["tests"]
     if "local_ms" in maps:
         for tid, v in maps["local_ms"].items():
@@ -330,6 +338,31 @@ def main() -> None:
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")
         return [id_by_num[x] for x in loc], allowed
 
+    map_idx = {t: i for i, t in enumerate(map_ids)}
+
+    def hot_plan(cid, tids):
+        """Code swaps for a function-body-only patch (tests/ files come from the farm), else None."""
+        r = analyses[cid]
+        if not HOT or r.broad or r.import_fp:
+            return None
+        code = {p: t for p, t in r.patched.items() if not p.startswith("tests/")}
+        if not code:
+            return []
+        swaps = hotswap.plan(REPO, code, r.trees)
+        r.trees = {}
+        if swaps is None:
+            return None
+        for p in code:
+            readers = an.opens(p)
+            if readers and any(t in map_idx and readers >> map_idx[t] & 1 for t in tids):
+                return None  # a local test reads this source text
+        return swaps
+
+    # Children fork from here: move everything the parent holds out of the collector's
+    # reach so they neither rescan nor copy it.
+    import gc
+    gc.collect()
+    gc.freeze()
     t_start = time.monotonic()
     results: dict[str, dict[str, bool]] = {}
     fp: dict = {}
@@ -365,15 +398,15 @@ def main() -> None:
             continue
         tids, allowed = decide(cid)
         if tids:
-            jobs.append((cid, analyses[cid].patched, tids, allowed))
+            jobs.append((cid, analyses[cid].patched, tids, allowed, hot_plan(cid, tids)))
     for c, patched, tids, allowed in retry:
-        jobs.append((c, patched, tids, allowed))
+        jobs.append((c, patched, tids, allowed, None))
     est_cpu = 0.0
     if jobs and oracle:
         lab = json.loads(Path(oracle).read_text())
         lab = lab.get("commits", lab)
         early = float(os.environ.get("BR_EARLY_STOP_S", "0"))
-        for c, _, tids, allowed in jobs:
+        for c, _, tids, allowed, *_ in jobs:
             f = lab[c]["failing"] if isinstance(lab[c], dict) else lab[c]
             fs = {id_by_num[n] for n in f}
             results[c] = {}
@@ -391,6 +424,11 @@ def main() -> None:
         jobs = []
     if jobs:
         preload()
+        if any(j[4] is not None for j in jobs):
+            if not warm_import(REPO):
+                jobs = [j[:4] + (None,) for j in jobs]
+            gc.collect()
+            gc.freeze()
         runner = LocalRunner(REPO, TMP, sec_by_id, log=log)
         left = max(5.0, LOCAL_BUDGET_S - (time.monotonic() - t_start))
         more = runner.run_many(jobs, parallel=2, budget_s=left)

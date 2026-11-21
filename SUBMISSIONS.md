@@ -24,3 +24,4 @@
 | 20 | `912006fc` | Sat 3:41 PM | 182.4 | 145.6 | 36.7 | 0 | v14c: prewarmed executor tables, lazy TPC tasks + early subtest stop, skip teardown. CPU +8 vs v13d: prewarm suspected (memory), disabled next |
 | 21 | `4f2d665b` | Sat 4:11 PM | 168.4 | 141.7 | 26.7 | 0 | v15: operator-swap value profile, insurance tests in free slack, prewarm off (CPU back down). Best so far; first simulated drop in 9 versions |
 | 22 | `82947f2b` | Sat 4:42 PM | 168.1 | 141.7 | 26.4 | 0 | v15b (A/B): heavy-test odds x0.4: no decision changes on the board. Reverted to x0.6 |
+| 23 | `6050f229` | Sat 5:12 PM | 168.2 | 141.7 | 26.5 | 0 | v16: and/or swap profile, empty-registry guard, local-rename no-ops (safety for unseen kinds; board same) |

@@ -15,6 +15,7 @@ import hashlib
 import importlib
 import pickle
 import pkgutil
+import os
 import sys
 import types
 
@@ -215,6 +216,12 @@ if __name__ == "__main__":
     if sys.argv[1] == "--one":
         import unittest  # noqa: F401  (sqlglot reads "unittest" in sys.modules at import, as under pytest)
         repo, out = sys.argv[2], sys.argv[3]
+        # The run-time check forks from a process that preloaded the test deps:
+        # match that global state (warning filters, loggers).
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import runner
+        runner.preload()
+        sys.path.pop(0)
         sys.path.insert(0, repo)
         with open(out, "wb") as f:
             pickle.dump(fingerprint(), f, protocol=5)

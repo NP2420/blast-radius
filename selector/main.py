@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE))
 
 import analyze  # noqa: E402
 import patchparse  # noqa: E402
-from runner import LocalRunner, fp_check_many, preload  # noqa: E402
+from runner import LocalRunner, fp_then_tests, preload  # noqa: E402
 
 DATA = Path(os.environ.get("BR_DATA", "/data"))
 REPO = os.environ.get("BR_REPO", "/opt/sqlglot")
@@ -88,9 +88,23 @@ def local_cost(nums, ms) -> float:
 P_STRONG = float(os.environ.get("BR_P_STRONG", "0.30"))
 P_WEAK = float(os.environ.get("BR_P_WEAK", "0.01"))
 P_MEDIUM = float(os.environ.get("BR_P_MEDIUM", "0.15"))
+# Failure rates by evidence kind and how many tests share it (calibrated on labeled commits):
+# a lone test reading a changed fixture or executing a changed line usually fails.
+P_BY_SIZE = os.environ.get("BR_P_BY_SIZE", "1") == "1"
 
 
-def plan(cands: list[int], ms: dict[int, int], strong: set | None = None, medium: set | None = None) -> tuple[list[int], list[int]]:
+def p_of(kind: str, n: int) -> float:
+    if kind == "file":
+        return 0.85 if n <= 3 else 0.3 if n <= 10 else 0.05
+    if kind == "strong":
+        return 0.8 if n == 1 else 0.5 if n <= 10 else 0.38 if n <= 50 else 0.08
+    if kind == "medium":
+        return 0.35 if n <= 3 else 0.27 if n <= 10 else 0.05
+    return P_WEAK
+
+
+def plan(cands: list[int], ms: dict[int, int], strong: set | None = None, medium: set | None = None,
+         pmap: dict | None = None) -> tuple[list[int], list[int]]:
     """Split candidates into (include directly, run locally), minimising expected cost.
 
     Expected cost = packed cost of the included set
@@ -104,7 +118,10 @@ def plan(cands: list[int], ms: dict[int, int], strong: set | None = None, medium
         return list(cands), []
     strong = strong or set()
     medium = medium or set()
-    p = {n: (P_STRONG if n in strong else P_MEDIUM if n in medium else P_WEAK) for n in cands}
+    if pmap is not None:
+        p = {n: pmap.get(n, P_WEAK) for n in cands}
+    else:
+        p = {n: (P_STRONG if n in strong else P_MEDIUM if n in medium else P_WEAK) for n in cands}
     st = sorted((n for n in cands if n in strong), key=lambda n: -ms[n])
     wk = sorted((n for n in cands if n not in strong), key=lambda n: -ms[n])
 
@@ -208,41 +225,33 @@ def main() -> None:
             r.tests |= r.import_heur
             r.import_fp = r.fp_func or r.state_guard
     fp_jobs = [(c, r.patched) for c, r in analyses.items() if not r.broad and r.import_fp]
-    fp: dict = {}
-    if fp_jobs:
-        if os.path.exists(FP_BASE):
-            fp = fp_check_many(REPO, TMP, FP_BASE, fp_jobs, log=log)
-        else:
-            fp = {c: ["<no baseline>"] for c, _ in fp_jobs}
-        for c, changed in fp.items():
-            r = analyses[c]
-            if r.key_attrs and not any(k.startswith("<") or k.startswith("global:") for k in changed):
-                # The edited table (and same-name copies in subclasses) must differ;
-                # anything else that changed is a ripple to account for.
-                changed = [k for k in changed if k.rsplit(".", 1)[-1].rsplit(":", 1)[-1] not in r.key_attrs]
-            if not changed:
-                r.notes.append("import state unchanged")
-                continue
-            users = 0
-            for key in changed:
-                u = an.state_key_users(key)
-                if u is None or len(changed) >= 50:
-                    users = an.all_bits
-                    break
-                users |= u
-            r.tests |= users
-            r.notes.append(f"import state changed ({len(changed)}): {changed[:3]}")
-    # Commits without a fingerprint verdict keep the heuristic import-time sets.
-    for c, r in analyses.items():
-        if not r.broad and r.import_fp and c not in fp:
-            r.tests |= r.import_heur
-    for p in patches:
-        cid = p.stem
+
+    def apply_fp(c, changed):
+        r = analyses[c]
+        if r.key_attrs and not any(k.startswith("<") or k.startswith("global:") for k in changed):
+            # The edited table (and same-name copies in subclasses) must differ;
+            # anything else that changed is a ripple to account for.
+            changed = [k for k in changed if k.rsplit(".", 1)[-1].rsplit(":", 1)[-1] not in r.key_attrs]
+        if not changed:
+            r.notes.append("import state unchanged")
+            return
+        users = 0
+        for key in changed:
+            u = an.state_key_users(key)
+            if u is None or len(changed) >= 50:
+                users = an.all_bits
+                break
+            users |= u
+        r.tests |= users
+        r.notes.append(f"import state changed ({len(changed)}): {changed[:3]}")
+
+    def decide(cid):
+        """Decide include/local/cond for one commit; returns (local test ids, allowed)."""
         res = analyses[cid]
         if res.broad:
             decisions[cid] = {"include": all_nums, "local": [], "broad": res.broad, "cond": []}
             log(f"{cid}: BROAD ({res.broad})")
-            continue
+            return [], {}
         cands = set(unmapped) | bits_to_nums(res.tests, map_ids, num_by_id)
         strong = bits_to_nums(res.strong, map_ids, num_by_id)
         medium = bits_to_nums(res.medium, map_ids, num_by_id)
@@ -293,20 +302,57 @@ def main() -> None:
             inc, loc = [], probe
             res.notes.append(f"equiv: probe {len(probe)}, conditional {len(cond)}")
         else:
-            inc, loc = plan(sorted(cands), ms, strong, medium)
+            pmap = None
+            if P_BY_SIZE:
+                files = bits_to_nums(res.file_readers, map_ids, num_by_id) & cands
+                st_ = (strong - files) & cands
+                md_ = (medium - strong - files) & cands
+                pmap = {}
+                for kind, S in (("medium", md_), ("strong", st_), ("file", files)):
+                    for n in S:
+                        pmap[n] = max(pmap.get(n, 0.0), p_of(kind, len(S)))
+            inc, loc = plan(sorted(cands), ms, strong, medium, pmap)
         LOCAL_MS.update(saved_local)
-        allowed = {t: q for t, q in allowed.items() if num_by_id[t] in set(loc)}
+        allowed = {t: sorted(q) for t, q in allowed.items() if num_by_id[t] in set(loc)}
         decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")
-        if loc:
-            jobs.append((cid, res.patched, [id_by_num[x] for x in loc], allowed))
+        return [id_by_num[x] for x in loc], allowed
 
+    t_start = time.monotonic()
     results: dict[str, dict[str, bool]] = {}
+    fp: dict = {}
+    retry: list = []
+    if fp_jobs and os.path.exists(FP_BASE):
+        preload()
+
+        def on_fp(c, changed):
+            apply_fp(c, changed)
+            return decide(c)
+
+        fp, results, retry = fp_then_tests(REPO, TMP, FP_BASE, fp_jobs, on_fp, sec_by_id,
+                                           parallel=2, budget_s=LOCAL_BUDGET_S, log=log)
+    fp_set = {c for c, _ in fp_jobs}
+    for c in fp_set:
+        if c in decisions:
+            continue  # decided inside the combined fingerprint/test run
+        apply_fp(c, fp.get(c, ["<no verdict>"]))
+    for p in patches:
+        cid = p.stem
+        if cid in decisions:
+            continue
+        tids, allowed = decide(cid)
+        if tids:
+            jobs.append((cid, analyses[cid].patched, tids, allowed))
+    for c, patched, tids, allowed in retry:
+        jobs.append((c, patched, tids, allowed))
     if jobs:
         preload()
         runner = LocalRunner(REPO, TMP, sec_by_id, log=log)
-        results = runner.run_many(jobs, parallel=2, budget_s=LOCAL_BUDGET_S)
+        left = max(5.0, LOCAL_BUDGET_S - (time.monotonic() - t_start))
+        more = runner.run_many(jobs, parallel=2, budget_s=left)
+        for c, r in more.items():
+            results.setdefault(c, {}).update(r)
 
     total = 0
     for p in patches:

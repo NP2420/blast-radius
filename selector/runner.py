@@ -121,6 +121,16 @@ def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int, a
             if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
                 del sys.modules[name]
         importlib.invalidate_caches()
+        _run_tests(wfd, test_ids, allowed)
+    except BaseException:
+        pass
+    finally:
+        os._exit(0)
+
+
+def _run_tests(wfd: int, test_ids: list, allowed: dict | None) -> None:
+    """Run unittest methods in this (already prepared) process, streaming results."""
+    if True:
         import syncpool
         syncpool.install()
         result = _Result(wfd)
@@ -155,10 +165,6 @@ def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int, a
             if any(not isinstance(t, unittest.TestCase) for t, _ in result.errors[before:]):
                 for tid in ran:
                     result._emit_raw({"id": tid, "failed": True})
-    except BaseException:
-        pass
-    finally:
-        os._exit(0)
 
 
 def _cls(tid: str) -> str:
@@ -255,7 +261,9 @@ class LocalRunner:
             except ProcessLookupError:
                 pass
         try:
-            os.waitpid(st["pid"], 0)
+            _, _, ru = os.wait4(st["pid"], 0)
+            if self.log and os.environ.get("BR_CPU_LOG"):
+                self.log(f"cpu child {st['commit']} {ru.ru_utime + ru.ru_stime:.2f}s tests={len(st.get('ntests', st['left']))}")
         except ChildProcessError:
             pass
         os.close(fd)
@@ -355,3 +363,177 @@ def fp_check_many(repo: str, tmp: str, base_path: str, jobs: list, parallel: int
                 res[c] = ["<error> bad output"]
             del active[fd]
     return res
+
+
+def _fp_test_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int, cmd_rfd: int) -> None:
+    """Fingerprint the patched import, report it, then run the tests the parent sends."""
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    try:
+        out = ["<error>"]
+        try:
+            build_farm(repo, farm, patched)
+            os.chdir(farm)
+            sys.dont_write_bytecode = True
+            os.environ["PYTHONPATH"] = farm
+            os.environ["SKIP_INTEGRATION"] = "0"
+            sys.path[:] = [farm, _HERE] + [p for p in sys.path if p and os.path.realpath(p) != os.path.realpath(repo)]
+            for name in list(sys.modules):
+                if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
+                    del sys.modules[name]
+            importlib.invalidate_caches()
+            import fingerprint
+            base = _FP_BASE[0]
+            if base is None:
+                import pickle
+                with open(base_path, "rb") as f:
+                    base = pickle.load(f)
+            out = fingerprint.diff(base, fingerprint.fingerprint(loose_only=True))
+        except BaseException as e:  # noqa: BLE001
+            out = ["<error> " + repr(e)[:200]]
+        os.write(wfd, (json.dumps({"fp": out[:50]}) + "\n").encode())
+        if out and out[0].startswith("<error>"):
+            return  # cannot import: parent will list tests without local runs
+        buf = b""
+        while b"\n" not in buf:
+            chunk = os.read(cmd_rfd, 1 << 20)
+            if not chunk:
+                return
+            buf += chunk
+        cmd = json.loads(buf.split(b"\n", 1)[0])
+        if cmd.get("tests"):
+            _run_tests(wfd, cmd["tests"], cmd.get("allowed"))
+    except BaseException:
+        pass
+    finally:
+        os._exit(0)
+
+
+def fp_then_tests(repo: str, tmp: str, base_path: str, jobs: list, decide, seconds: dict,
+                  parallel: int = 2, budget_s: float = 1e9, log=None):
+    """Fingerprint + local tests in one process per commit.
+
+    jobs: [(commit, patched)]; decide(commit, changed) -> (test_ids, allowed) to run locally.
+    Returns (fp_results {commit: changed}, local_results {commit: {test: failed}}, retry_jobs)
+    where retry_jobs are (commit, patched, test_ids, allowed) left unfinished after a timeout.
+    """
+    if _FP_BASE[0] is None and jobs:
+        import pickle
+        with open(base_path, "rb") as f:
+            _FP_BASE[0] = pickle.load(f)
+    fp_res: dict = {}
+    loc_res: dict = {c: {} for c, _ in jobs}
+    retry: list = []
+    pending = list(jobs)
+    active: dict = {}
+    stop_at = time.monotonic() + budget_s
+
+    def limit(tid):
+        return 2.0 + 6.0 * seconds.get(tid, 1.0)
+
+    while pending or active:
+        while pending and len(active) < parallel:
+            c, patched = pending.pop(0)
+            rfd, wfd = os.pipe()
+            crfd, cwfd = os.pipe()
+            farm = os.path.join(tmp, f"fpt_{c}")
+            pid = os.fork()
+            if pid == 0:
+                os.close(rfd)
+                os.close(cwfd)
+                _fp_test_child(repo, farm, patched, base_path, wfd, crfd)
+            os.close(wfd)
+            os.close(crfd)
+            active[rfd] = {"pid": pid, "commit": c, "patched": patched, "cw": cwfd, "farm": farm,
+                           "buf": b"", "stage": "fp", "left": [], "allowed": None,
+                           "deadline": time.monotonic() + 40.0}
+        if time.monotonic() >= stop_at:
+            for fd in list(active):
+                st = active.pop(fd)
+                try:
+                    os.kill(st["pid"], signal.SIGKILL)
+                    os.waitpid(st["pid"], 0)
+                except (ProcessLookupError, ChildProcessError):
+                    pass
+                os.close(fd)
+                try:
+                    os.close(st["cw"])
+                except OSError:
+                    pass
+                shutil.rmtree(st["farm"], ignore_errors=True)
+                fp_res.setdefault(st["commit"], ["<error> budget"])
+            break
+        now = time.monotonic()
+        timeout = max(0.0, min(min(st["deadline"] for st in active.values()), stop_at) - now)
+        ready, _, _ = select.select(list(active), [], [], timeout)
+        for fd in ready:
+            st = active[fd]
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                st["eof"] = True
+            st["buf"] += chunk
+            while b"\n" in st["buf"]:
+                line, st["buf"] = st["buf"].split(b"\n", 1)
+                msg = json.loads(line)
+                if "fp" in msg:
+                    c = st["commit"]
+                    fp_res[c] = msg["fp"]
+                    tests, allowed = ([], None)
+                    if not (msg["fp"] and msg["fp"][0].startswith("<error>")):
+                        tests, allowed = decide(c, msg["fp"])
+                    st["left"] = list(tests)
+                    st["allowed"] = allowed
+                    try:
+                        os.write(st["cw"], (json.dumps({"tests": tests, "allowed": allowed}) + "\n").encode())
+                    except OSError:
+                        pass
+                    st["stage"] = "tests"
+                    st["deadline"] = time.monotonic() + (15.0 + limit(tests[0]) if tests else 10.0)
+                    continue
+                tid = msg.get("id")
+                if tid is not None and tid in st["left"]:
+                    st["left"].remove(tid)
+                    loc_res[st["commit"]][tid] = loc_res[st["commit"]].get(tid, False) or msg["failed"]
+                    if st["left"]:
+                        nxt = st["left"][0]
+                        extra = 15.0 if _cls(nxt) != _cls(tid) else 0.0
+                        st["deadline"] = time.monotonic() + limit(nxt) + extra
+                    else:
+                        st["deadline"] = time.monotonic() + 5.0
+        now = time.monotonic()
+        for fd in list(active):
+            st = active[fd]
+            done = st.get("eof") or now >= st["deadline"]
+            if not done:
+                continue
+            active.pop(fd)
+            if not st.get("eof"):
+                try:
+                    os.kill(st["pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                _, _, ru = os.wait4(st["pid"], 0)
+                if log and os.environ.get("BR_CPU_LOG"):
+                    log(f"cpu fpchild {st['commit']} {ru.ru_utime + ru.ru_stime:.2f}s stage={st['stage']}")
+            except ChildProcessError:
+                pass
+            os.close(fd)
+            try:
+                os.close(st["cw"])
+            except OSError:
+                pass
+            shutil.rmtree(st["farm"], ignore_errors=True)
+            c = st["commit"]
+            if st["stage"] == "fp":
+                fp_res.setdefault(c, ["<error> no fingerprint"])
+            elif st["left"]:
+                bad = st["left"][0]
+                loc_res[c][bad] = True
+                if log:
+                    log(f"{c}: {bad} {'crashed' if st.get('eof') else 'timed out'}")
+                if st["left"][1:]:
+                    retry.append((c, st["patched"], st["left"][1:], st["allowed"]))
+    return fp_res, loc_res, retry

@@ -18,4 +18,5 @@
 | 14 | `a4a48072` | Sat 9:34 AM | 182.1 | 147.7 | 35.0 | 0 | v12j: odds x0.6, fixture readers x1.0. Best safe score |
 | 15 | `ff41f0f9` | Sat 10:35 AM | 182.4 | 145.6 | 36.8 | 0 | v12k: local overhead 150 ms |
 | 16 | `44495c74` | Sat 11:36 AM | 174.2 | 145.6 | 28.6 | 0 | v13: hot-swap local runs (no re-import for function-body patches), new-function insertions, faster parent. CPU -8.3. Best so far, safe |
-| 17 | `798da171` | Sat 12:37 PM | 183.1 | 145.6 | 37.5 | 0 | v13b (A/B): correlated failure odds: more local runs, same simulated, CPU +8.9. Reverted |
+| 17 | `798da171` | Sat 12:37 PM | 184.0 | 145.6 | 37.5 | 0 | v13b (A/B): correlated failure odds: more local runs, same simulated, CPU +8.9. Reverted |
+| 18 | `9d4a2aed` | Sat 1:38 PM | 173.3 | 145.6 | 27.6 | 0 | v13d: cheap tests odds x0.8, structural patches handled, metadata files inert. Best so far |

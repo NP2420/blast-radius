@@ -93,11 +93,15 @@ P_MEDIUM = float(os.environ.get("BR_P_MEDIUM", "0.15"))
 P_BY_SIZE = os.environ.get("BR_P_BY_SIZE", "1") == "1"
 
 
-P_SCALE = float(os.environ.get("BR_P_SCALE", "1.0"))
+P_SCALE = float(os.environ.get("BR_P_SCALE", "0.75"))
+
+
+P_SCALE_FILE = os.environ.get("BR_P_SCALE_FILE", "1.0")
 
 
 def p_of(kind: str, n: int) -> float:
-    return min(0.97, P_SCALE * _p_of(kind, n))
+    sc = float(P_SCALE_FILE) if (kind == "file" and P_SCALE_FILE) else P_SCALE
+    return min(0.97, sc * _p_of(kind, n))
 
 
 def _p_of(kind: str, n: int) -> float:
@@ -368,11 +372,21 @@ def main() -> None:
     if jobs and oracle:
         lab = json.loads(Path(oracle).read_text())
         lab = lab.get("commits", lab)
+        early = float(os.environ.get("BR_EARLY_STOP_S", "0"))
         for c, _, tids, allowed in jobs:
             f = lab[c]["failing"] if isinstance(lab[c], dict) else lab[c]
             fs = {id_by_num[n] for n in f}
-            results[c] = {t: t in fs for t in tids}
-            est_cpu += local_cost([num_by_id[t] for t in tids], ms) / 1000.0
+            results[c] = {}
+            ran = []
+            failed = False
+            for t in tids:
+                if failed and early and sec_by_id[t] < early:
+                    results[c][t] = True  # listed without running
+                    continue
+                results[c][t] = t in fs
+                ran.append(t)
+                failed = failed or t in fs
+            est_cpu += local_cost([num_by_id[t] for t in ran], ms) / 1000.0
         log(f"oracle local cpu estimate {est_cpu:.1f} s over {len(jobs)} jobs")
         jobs = []
     if jobs:

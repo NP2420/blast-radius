@@ -171,6 +171,55 @@ def main() -> None:
 
         visit(tree, lambda rel=rel: file_cov_bits.get(rel, 0))
 
+    # Names read by code that runs at import (functions with import-time lines,
+    # including string constants passed to getattr), and aliases created by
+    # class-body / module-level assignments (FOO = Parent.BAR makes BAR -> FOO).
+    import_ref_names: set = set()
+    aliases: dict[str, set] = {}
+    for py in Path(repo, "sqlglot").rglob("*.py"):
+        rel = str(py.relative_to(repo))
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        il = set(import_lines.get(rel, []))
+
+        def names_in(node):
+            out = set()
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Name):
+                    out.add(sub.id)
+                elif isinstance(sub, ast.Attribute):
+                    out.add(sub.attr)
+                elif isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value.isidentifier():
+                    out.add(sub.value)
+            return out
+
+        def scan(body, in_func):
+            for node in body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    lines = range(node.body[0].lineno, (node.end_lineno or node.lineno) + 1)
+                    if any(l in il for l in lines):
+                        import_ref_names.update(names_in(node))
+                    continue
+                if isinstance(node, ast.ClassDef):
+                    scan(node.body, False)
+                    continue
+                if not in_func and isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    tnames = set()
+                    for t in targets:
+                        for sub in ast.walk(t):
+                            if isinstance(sub, ast.Name):
+                                tnames.add(sub.id)
+                    if node.value is not None:
+                        for n in names_in(node.value):
+                            aliases.setdefault(n, set()).update(tnames - {n})
+                elif not in_func and isinstance(node, (ast.Expr, ast.For, ast.If, ast.With)):
+                    import_ref_names.update(names_in(node))
+
+        scan(tree.body, False)
+
     # Tests per test file, and test-module import graph (static, transitive).
     file_tests: dict[str, int] = {}
     for t in tests:
@@ -245,6 +294,8 @@ def main() -> None:
         "tcls": {k: sid(b) for k, b in tcls.items()},
         "name_users": {k: sid(b) for k, b in name_bits.items()},
         "attr_refs": {k: sid(b) for k, b in attr_bits.items() if b},
+        "import_ref_names": import_ref_names,
+        "aliases": {k: sorted(v) for k, v in aliases.items() if v},
         "funcs": funcs,
         "file_tests": file_tests,
         "test_importers": test_importers,

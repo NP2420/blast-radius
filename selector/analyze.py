@@ -15,6 +15,7 @@ from patchparse import ApplyError, FileDiff, apply
 # file-open map at build time). Anything else unknown is "broad".
 INERT_PREFIXES = ("benchmarks/", "posts/", "pdoc/", "docs/", ".github/", "sqlglot-integration-tests/")
 INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
+ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 
 
 @dataclass
@@ -24,6 +25,7 @@ class Result:
     import_fp: bool = False                        # touches code run at import: check state fingerprint
     import_heur: int = 0                           # import-time candidates by heuristics (used if no fingerprint)
     fp_func: bool = False                          # function code that also runs at import changed
+    equiv: bool = False                            # every code change is an is/== swap against None/enum
     broad: str | None = None                       # reason, if we must run everything
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
@@ -110,6 +112,9 @@ class Analyzer:
                 self._data_file(path, res)
             if res.broad:
                 return res
+            if not path.endswith(".py") and path not in ():
+                res.nonequiv_files = getattr(res, "nonequiv_files", 0) + 1
+        res.equiv = getattr(res, "equiv_files", 0) > 0 and getattr(res, "nonequiv_files", 0) == 0
         return res
 
     # ---- non-python files ------------------------------------------------
@@ -152,6 +157,11 @@ class Analyzer:
         if ast.dump(old_tree) == ast.dump(new_tree):
             res.notes.append(f"{path}: AST unchanged")
             return
+        if swap_equivalent(old_tree, new_tree, path):
+            res.equiv_files = getattr(res, "equiv_files", 0) + 1
+            res.notes.append(f"{path}: is/== swap")
+        else:
+            res.nonequiv_files = getattr(res, "nonequiv_files", 0) + 1
 
         old_idx = _ScopeIndex(old_tree)
         new_idx = _ScopeIndex(new_tree)
@@ -251,7 +261,12 @@ class Analyzer:
         if k == "class":
             qual = kind[2]
             cls_node = kind[1]
-            res.tests |= self.recv(f"{module}:{qual}")
+            narrowed = self._attr_narrow(module, qual, idx.names_assigned(ln)) if ATTR_NARROW else None
+            if narrowed is not None:
+                res.tests |= narrowed
+                res.notes.append(f"{path}:{ln} attr-narrowed {qual}")
+            else:
+                res.tests |= self.recv(f"{module}:{qual}")
             res.tests |= self._class_methods_cov(path, qual)
             if tree == "old" and cls_node is not None:
                 res.tests |= self.collect_lines(path, range(cls_node.lineno, (cls_node.end_lineno or cls_node.lineno) + 1))
@@ -311,6 +326,31 @@ class Analyzer:
         bits |= self.recv(f"{module}:{name}")  # a module-level class object itself
         return bits
 
+    def _attr_narrow(self, module: str, qual: str, names: set) -> int | None:
+        """Tests that use class `qual` AND run code that reads one of `names`.
+
+        None (fall back to every user of the class) when a name is read during
+        import, copied under another name, or never read at run time by name.
+        """
+        if not names:
+            return None
+        imp = self.m.get("import_ref_names")
+        if imp is None:
+            return None
+        todo, seen = list(names), set()
+        while todo:
+            n = todo.pop()
+            if n in seen:
+                continue
+            seen.add(n)
+            if n in imp:
+                return None
+            todo.extend(self.m["aliases"].get(n, ()))
+        users = self._name_users(seen)
+        if not users:
+            return None
+        return self.recv(f"{module}:{qual}") & users
+
     def _func_by_name(self, path: str, qual: str) -> set:
         # Coverage of an old function with the same qualified name, if any.
         for (q, a, b) in self.m["funcs"].get(path, []):
@@ -339,6 +379,46 @@ class Analyzer:
             if sid is not None:
                 out |= self.sets[sid]
         return out
+
+
+def _is_enumish(n) -> bool:
+    return isinstance(n, ast.Attribute) and n.attr.isupper() and len(n.attr) > 1
+
+
+def _is_none(n) -> bool:
+    return isinstance(n, ast.Constant) and n.value is None
+
+
+class _SwapNorm(ast.NodeTransformer):
+    """Map `is`/`is not` to `==`/`!=` where one side is None or an enum member."""
+
+    def visit_Compare(self, node):
+        self.generic_visit(node)
+        operands = [node.left] + node.comparators
+        ops = []
+        for i, op in enumerate(node.ops):
+            a, b = operands[i], operands[i + 1]
+            if any(_is_none(x) or _is_enumish(x) for x in (a, b)):
+                if isinstance(op, ast.Is):
+                    op = ast.Eq()
+                elif isinstance(op, ast.IsNot):
+                    op = ast.NotEq()
+            ops.append(op)
+        node.ops = ops
+        return node
+
+
+def swap_equivalent(old_tree, new_tree, path: str) -> bool:
+    """True if the trees differ only by is/== swaps against None or enum members.
+
+    sqlglot's __eq__ implementations all return False for None and enum members
+    compare by identity; executor.env.reverse_key.__eq__ would raise, so the
+    executor's env module is excluded.
+    """
+    if path.endswith("executor/env.py"):
+        return False
+    import copy
+    return ast.dump(_SwapNorm().visit(copy.deepcopy(old_tree))) == ast.dump(_SwapNorm().visit(copy.deepcopy(new_tree)))
 
 
 class _ScopeIndex:

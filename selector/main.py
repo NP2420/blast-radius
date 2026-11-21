@@ -30,6 +30,8 @@ REPO = os.environ.get("BR_REPO", "/opt/sqlglot")
 MAPS = os.environ.get("BR_MAPS", str(HERE.parent / "maps" / "maps.pkl"))
 FP_BASE = os.environ.get("BR_FP_BASE", str(Path(MAPS).parent / "fp_base.pkl"))
 FP_NARROW = os.environ.get("BR_FP_NARROW", "0") == "1"
+EQUIV = os.environ.get("BR_EQUIV", "1") == "1"
+EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "1000"))
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
 LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "600"))
@@ -227,13 +229,28 @@ def main() -> None:
         cid = p.stem
         res = analyses[cid]
         if res.broad:
-            decisions[cid] = {"include": all_nums, "local": [], "broad": res.broad}
+            decisions[cid] = {"include": all_nums, "local": [], "broad": res.broad, "cond": []}
             log(f"{cid}: BROAD ({res.broad})")
             continue
         cands = set(unmapped) | bits_to_nums(res.tests, map_ids, num_by_id)
         strong = bits_to_nums(res.strong, map_ids, num_by_id)
-        inc, loc = plan(sorted(cands), ms, strong)
-        decisions[cid] = {"include": inc, "local": loc, "patched": res.patched}
+        cond: list[int] = []
+        if EQUIV and res.equiv and cands:
+            # Swap with no semantic effect: probe with cheap candidates (strong first);
+            # list the rest only if a probe fails.
+            order = sorted(cands, key=lambda n: (n not in strong, LOCAL_MS.get(n, ms[n])))
+            probe, budget = [], EQUIV_PROBE_MS
+            for n in order:
+                c = LOCAL_MS.get(n, ms[n])
+                if c <= budget and c <= 1000:
+                    probe.append(n)
+                    budget -= c
+            cond = [n for n in cands if n not in set(probe)]
+            inc, loc = [], probe
+            res.notes.append(f"equiv: probe {len(probe)}, conditional {len(cond)}")
+        else:
+            inc, loc = plan(sorted(cands), ms, strong)
+        decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")
         if loc:
@@ -251,10 +268,15 @@ def main() -> None:
         d = decisions[cid]
         chosen = set(d["include"])
         r = results.get(cid, {})
+        probe_failed = False
         for x in d["local"]:
             tid = id_by_num[x]
             if r.get(tid, True):  # failed, or never finished: include
                 chosen.add(x)
+                probe_failed = True
+        if probe_failed and d.get("cond"):
+            chosen.update(d["cond"])
+            log(f"{cid}: equiv probe failed; listing {len(d['cond'])} conditional tests")
         cost, workers = pack(sorted(chosen), ms)
         total += cost
         sys.stdout.write(json.dumps({"commit": cid, "workers": workers}) + "\n")

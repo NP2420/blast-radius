@@ -15,7 +15,7 @@ shutil.rmtree("/opt/sqlglot/sqlglot-integration-tests", ignore_errors=True)
 PY
 COPY requirements.lock /tmp/requirements.lock
 RUN pip install --no-cache-dir -r /tmp/requirements.lock
-COPY tools/label.py tools/outcome_plugin.py /label/
+COPY tools/label.py tools/outcome_plugin.py selector/patchparse.py /label/
 COPY tests.json /label/tests.json
 ENV LABEL_SRC=/opt/sqlglot LABEL_PY=/usr/local/bin/python LABEL_TOOLS=/label LABEL_JOBS=8
 CMD ["sh", "-c", "python /label/label.py /label/tests.json /work/labels.json /work/*.patch"]

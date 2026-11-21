@@ -323,15 +323,26 @@ def main() -> None:
     results: dict[str, dict[str, bool]] = {}
     fp: dict = {}
     retry: list = []
-    if fp_jobs and os.path.exists(FP_BASE):
+    # Offline tuning: BR_FP_CACHE replays fingerprint verdicts; BR_ORACLE answers
+    # local runs from labels and estimates their CPU (no tests run).
+    fp_cache = os.environ.get("BR_FP_CACHE")
+    oracle = os.environ.get("BR_ORACLE")
+    if fp_cache and os.path.exists(fp_cache) and oracle:
+        fp = json.loads(Path(fp_cache).read_text())
+        fp_jobs_run = []
+    else:
+        fp_jobs_run = fp_jobs
+    if fp_jobs_run and os.path.exists(FP_BASE):
         preload()
 
         def on_fp(c, changed):
             apply_fp(c, changed)
             return decide(c)
 
-        fp, results, retry = fp_then_tests(REPO, TMP, FP_BASE, fp_jobs, on_fp, sec_by_id,
+        fp, results, retry = fp_then_tests(REPO, TMP, FP_BASE, fp_jobs_run, on_fp, sec_by_id,
                                            parallel=2, budget_s=LOCAL_BUDGET_S, log=log)
+        if fp_cache:
+            Path(fp_cache).write_text(json.dumps(fp))
     fp_set = {c for c, _ in fp_jobs}
     for c in fp_set:
         if c in decisions:
@@ -346,6 +357,17 @@ def main() -> None:
             jobs.append((cid, analyses[cid].patched, tids, allowed))
     for c, patched, tids, allowed in retry:
         jobs.append((c, patched, tids, allowed))
+    est_cpu = 0.0
+    if jobs and oracle:
+        lab = json.loads(Path(oracle).read_text())
+        lab = lab.get("commits", lab)
+        for c, _, tids, allowed in jobs:
+            f = lab[c]["failing"] if isinstance(lab[c], dict) else lab[c]
+            fs = {id_by_num[n] for n in f}
+            results[c] = {t: t in fs for t in tids}
+            est_cpu += local_cost([num_by_id[t] for t in tids], ms) / 1000.0
+        log(f"oracle local cpu estimate {est_cpu:.1f} s over {len(jobs)} jobs")
+        jobs = []
     if jobs:
         preload()
         runner = LocalRunner(REPO, TMP, sec_by_id, log=log)

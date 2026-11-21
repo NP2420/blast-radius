@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import os
+import sys
 from dataclasses import dataclass, field
 
 from patchparse import ApplyError, FileDiff, apply
@@ -18,6 +19,7 @@ INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
 MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
+IMPORT_LOCAL = os.environ.get("BR_IMPORT_LOCAL", "1") == "1"
 
 
 @dataclass
@@ -363,8 +365,14 @@ class Analyzer:
             # test; the fingerprint ripple guard covers import-time effects.
             names = self._alias_closure(idx.names_assigned(ln))
             nl = self.m.get("name_line_users", {})
+            is_import = isinstance(idx.stmt_at(ln), (ast.Import, ast.ImportFrom))
+            if is_import and IMPORT_LOCAL:
+                # An import binds names in this module only: its run-time readers are
+                # the lines of this file that read them (other modules' bindings and
+                # import errors show in the fingerprint).
+                res.tests |= self.cov_lines(path, self._read_lines(path, names))
             for n in names:
-                sid = nl.get(n)
+                sid = None if (is_import and IMPORT_LOCAL) else nl.get(n)
                 if sid is not None:
                     res.tests |= self.sets[sid]
                 sid = self.m.get("test_name_imports", {}).get(f"{module}:{n}")
@@ -383,6 +391,9 @@ class Analyzer:
             wide = res.tests
             node = idx.stmt_at(ln)
             plain = isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+            if os.environ.get("BR_MN_DEBUG"):
+                print("MNDBG", path, ln, type(node).__name__, bin(narrow).count("1"), round(self._weight(narrow)),
+                      bin(wide).count("1"), round(self._weight(wide)), file=sys.stderr)
             if plain and self._weight(wide) < self._weight(narrow):
                 res.tests = wide
                 res.notes.append(f"{path}:{ln} module level (file set)")
@@ -405,6 +416,32 @@ class Analyzer:
             res.tests |= self.m["test_importers"].get(module, 0)
         names = idx.names_assigned(ln)
         res.tests |= self._name_users(names)
+
+    def _read_lines(self, path: str, names) -> list:
+        """Lines of the pristine file that load any of names (bare names or attribute roots)."""
+        cache = self.__dict__.setdefault("_read_cache", {})
+        tree = cache.get(path)
+        if tree is None:
+            try:
+                tree = ast.parse(open(os.path.join(self.repo, path), encoding="utf-8").read())
+            except (OSError, SyntaxError, ValueError):
+                tree = False
+            cache[path] = tree
+        if tree is False:
+            return []
+        names = set(names)
+        out = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id in names and isinstance(node.ctx, ast.Load):
+                out.update(range(node.lineno, (getattr(node, "end_lineno", None) or node.lineno) + 1))
+        # Include whole enclosing statements' first lines too (coverage records statement starts).
+        stmts = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.stmt):
+                a0, b0 = node.lineno, getattr(node, "end_lineno", node.lineno) or node.lineno
+                if any(a0 <= x <= b0 for x in out) and not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.If, ast.For, ast.While, ast.With, ast.Try)):
+                    out.update(range(a0, b0 + 1))
+        return sorted(out)
 
     def _weight(self, bits: int) -> float:
         """Total local run time (ms) of a test bitset."""

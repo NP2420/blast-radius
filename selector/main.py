@@ -39,7 +39,7 @@ EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "500"))
 TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "1") == "1"
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
-LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "300"))
+LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "150"))
 CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.5"))
 LOCAL_BUDGET_S = float(os.environ.get("BR_LOCAL_BUDGET_S", "110"))
 NO_LOCAL = os.environ.get("BR_NO_LOCAL") == "1"

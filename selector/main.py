@@ -26,6 +26,7 @@ import patchparse  # noqa: E402
 from runner import LocalRunner, fp_then_tests, preload, warm_import, prewarm_executor  # noqa: E402
 EXEC_CLS = "tests/test_executor.py::TestExecutor"
 import hotswap  # noqa: E402
+import runner as runner_mod  # noqa: E402
 
 DATA = Path(os.environ.get("BR_DATA", "/data"))
 REPO = os.environ.get("BR_REPO", "/opt/sqlglot")
@@ -45,7 +46,9 @@ LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "150"))
 CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.5"))
 HOT = os.environ.get("BR_HOT", "1") == "1"
 FP_MAXKEYS = int(os.environ.get("BR_FP_MAXKEYS", "50"))
-PREWARM = os.environ.get("BR_PREWARM", "1") == "1"
+PREWARM = os.environ.get("BR_PREWARM", "0") == "1"
+LAZY_CHECK = os.environ.get("BR_LAZY_CHECK", "0") == "1"
+FILL_SLACK = os.environ.get("BR_FILL_SLACK", "1") == "1"
 PREWARM_PLAN = os.environ.get("BR_PREWARM_PLAN", "0") == "1"
 PREWARM_SETUP_MS = int(os.environ.get("BR_PREWARM_SETUP_MS", "150"))
 LOCAL_BUDGET_S = float(os.environ.get("BR_LOCAL_BUDGET_S", "110"))
@@ -439,6 +442,15 @@ def main() -> None:
 
         def on_fp(c, changed):
             apply_fp(c, changed)
+            if LAZY_CHECK and runner_mod.LAZY_RES.get(c) == 1:
+                # The fresh-interpreter test sees exactly what the fp child just saw.
+                r = analyses[c]
+                keep = ~an.m["proc_tests"]
+                r.tests &= keep
+                r.import_heur &= keep
+                r.strong &= keep
+                r.medium &= keep
+                r.notes.append("lazy-load check passed in fingerprint child")
             return decide(c)
 
         fp, results, retry = fp_then_tests(REPO, TMP, FP_BASE, fp_jobs_run, on_fp, sec_by_id,
@@ -497,6 +509,38 @@ def main() -> None:
         for c, r in more.items():
             results.setdefault(c, {}).update(r)
 
+    sec_by_num = {t["number"]: t["seconds"] for t in tests}
+
+    def insurance(cid, chosen, d, r):
+        """Tests worth adding for free: candidates verified locally (in case a local
+        verdict was wrong), then tests that ran any line of a changed file."""
+        out = [x for x in d.get("local", []) if x not in chosen and not r.get(id_by_num[x], True)]
+        res = analyses.get(cid)
+        bits = 0
+        if res is not None:
+            for path in res.patched:
+                if path.startswith("sqlglot/"):
+                    bits |= an.cov_file(path)
+                elif path.startswith("tests/"):
+                    bits |= an.m["file_tests"].get(path, 0) | an.opens(path)
+        seen = set(out) | set(chosen)
+        extra = sorted((n for n in bits_to_nums(bits, map_ids, num_by_id) if n not in seen),
+                       key=lambda n: sec_by_num[n])
+        return out + extra
+
+    def fill_slack(workers, extra):
+        """Add tests to workers below the busiest one without raising its time."""
+        loads = [sum(sec_by_num[n] for n in w) for w in workers]
+        top = max(loads) - 1e-6
+        workers = [list(w) for w in workers]
+        for n in extra:
+            t = sec_by_num[n]
+            i = min(range(len(workers)), key=lambda j: loads[j])
+            if loads[i] + t <= top:
+                workers[i].append(n)
+                loads[i] += t
+        return workers
+
     total = 0
     for p in patches:
         cid = p.stem
@@ -513,6 +557,8 @@ def main() -> None:
             chosen.update(d["cond"])
             log(f"{cid}: equiv probe failed; listing {len(d['cond'])} conditional tests")
         cost, workers = pack(sorted(chosen), ms)
+        if FILL_SLACK and workers and not d.get("broad"):
+            workers = fill_slack(workers, insurance(cid, chosen, d, r))
         total += cost
         sys.stdout.write(json.dumps({"commit": cid, "workers": workers}) + "\n")
     sys.stdout.flush()

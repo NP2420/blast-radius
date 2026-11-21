@@ -69,6 +69,7 @@ def warm_import(repo: str) -> bool:
 
 
 _PREWARM: dict = {}
+LAZY_RES: dict = {}  # commit -> dialect classes registered by a bare `import sqlglot` (fp child)
 _EXEC_CLS = "tests/test_executor.py::TestExecutor"
 
 
@@ -524,6 +525,13 @@ def _fp_test_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int
                 if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
                     del sys.modules[name]
             importlib.invalidate_caches()
+            # What tests/dialects/test_dialect.py::test_lazy_load checks in a fresh
+            # interpreter: importing sqlglot alone registers exactly one dialect class.
+            try:
+                import sqlglot
+                lazy_n = len(sqlglot.Dialect._classes)
+            except BaseException:  # noqa: BLE001
+                lazy_n = -1
             import fingerprint
             base = _FP_BASE[0]
             if base is None:
@@ -533,7 +541,7 @@ def _fp_test_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int
             out = fingerprint.diff(base, fingerprint.fingerprint(loose_only=True))
         except BaseException as e:  # noqa: BLE001
             out = ["<error> " + repr(e)[:200]]
-        os.write(wfd, (json.dumps({"fp": out[:FP_MAXKEYS]}) + "\n").encode())
+        os.write(wfd, (json.dumps({"fp": out[:FP_MAXKEYS], "lazy": locals().get("lazy_n", -1)}) + "\n").encode())
         if out and out[0].startswith("<error>"):
             return  # cannot import: parent will list tests without local runs
         buf = b""
@@ -620,6 +628,7 @@ def fp_then_tests(repo: str, tmp: str, base_path: str, jobs: list, decide, secon
                 if "fp" in msg:
                     c = st["commit"]
                     fp_res[c] = msg["fp"]
+                    LAZY_RES[c] = msg.get("lazy", -1)
                     tests, allowed = ([], None)
                     if not (msg["fp"] and msg["fp"][0].startswith("<error>")):
                         tests, allowed = decide(c, msg["fp"])

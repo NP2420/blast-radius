@@ -35,6 +35,7 @@ KEEP_TREES = os.environ.get("BR_KEEP_TREES", "0") == "1"
 PURE_INSERT = os.environ.get("BR_PURE_INSERT", "1") == "1"
 STRUCT = os.environ.get("BR_STRUCT", "1") == "1"
 SKIP_BLANK_PINS = os.environ.get("BR_SKIP_BLANK_PINS", "1") == "1"
+CMP_PROFILE = os.environ.get("BR_CMP_PROFILE", "1") == "1"
 
 
 @dataclass
@@ -310,6 +311,9 @@ class Analyzer:
         if _ast_same(old_tree, new_tree):
             res.notes.append(f"{path}: AST unchanged")
             return
+        if CMP_PROFILE and path.startswith("sqlglot/") and self.m.get("cmp_sites"):
+            if self._op_swap_tests(path, old_tree, new_tree, res):
+                return
         if _maybe_swap(old, new) and swap_equivalent(old_tree, new_tree, path):
             res.equiv_files = getattr(res, "equiv_files", 0) + 1
             res.notes.append(f"{path}: is/== swap")
@@ -574,6 +578,38 @@ class Analyzer:
                         walk(node.body, q)
             walk(tree.body, "")
         return bits
+
+    def _op_swap_tests(self, path, old_tree, new_tree, res) -> bool:
+        """Only comparison operators changed (single-operator comparisons inside
+        functions): charge each swap to the tests whose profiled operands give a
+        different result under the new operator. False when the rule does not apply."""
+        try:
+            swaps = _op_swaps(old_tree, new_tree)
+        except RecursionError:
+            return False
+        if not swaps:
+            return False
+        imp = set(self.m["import_lines"].get(path, ()))
+        prof, unk = self.m.get("cmp", {}), self.m.get("cmp_unknown", {})
+        untrusted = self.sets[self.m["cmp_untrusted"]] if "cmp_untrusted" in self.m else 0
+        tests = 0
+        for ln, col, old_op, new_op in swaps:
+            site = f"{path}:{ln}:{col}"
+            if site not in self.m["cmp_sites"] or ln in imp or new_op not in _CMP_FAMILY.get(old_op, ()):
+                return False
+            sid = prof.get(site, {}).get(new_op)
+            if sid is not None:
+                tests |= self.sets[sid]
+            line = self.cov_lines(path, [ln])
+            if site in unk:
+                tests |= line  # operands the profile could not evaluate safely
+            tests |= line & untrusted
+            tests |= self.collect_lines(path, [ln])
+            res.strong_lines.append((path, [ln]))  # per-query narrowing of heavy tests
+        res.tests |= tests
+        res.strong |= tests
+        res.notes.append(f"{path}: {len(swaps)} operator swap(s), profile -> {bin(tests).count('1')} tests")
+        return True
 
     def _read_lines(self, path: str, names) -> list:
         """Lines of the pristine file that load any of names (bare names or attribute roots)."""
@@ -879,6 +915,42 @@ def _pure_func_insertion(old: ast.Module, new: ast.Module) -> list | None:
     if i != len(o):
         return None
     return added or None
+
+
+_RICH = ("Eq", "NotEq", "Lt", "LtE", "Gt", "GtE")
+_CMP_FAMILY = {
+    "Eq": [o for o in _RICH if o != "Eq"] + ["Is", "IsNot"],
+    "NotEq": [o for o in _RICH if o != "NotEq"] + ["Is", "IsNot"],
+    "Lt": [o for o in _RICH if o != "Lt"], "LtE": [o for o in _RICH if o != "LtE"],
+    "Gt": [o for o in _RICH if o != "Gt"], "GtE": [o for o in _RICH if o != "GtE"],
+    "Is": ["IsNot", "Eq", "NotEq"], "IsNot": ["Is", "Eq", "NotEq"],
+    "In": ["NotIn"], "NotIn": ["In"],
+}
+
+
+def _op_swaps(old: ast.AST, new: ast.AST) -> list | None:
+    """[(line, col, old_op, new_op)] when the trees differ only in the operator of
+    single-operator comparisons inside functions or lambdas; else None."""
+    out = []
+
+    def same(a, b, depth):
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, ast.AST):
+            d = depth + isinstance(a, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+            if isinstance(a, ast.Compare) and len(a.ops) == 1 == len(b.ops) and type(a.ops[0]) is not type(b.ops[0]):
+                if depth == 0:
+                    return False
+                out.append((a.lineno, a.col_offset, type(a.ops[0]).__name__, type(b.ops[0]).__name__))
+                return same(a.left, b.left, d) and same(a.comparators, b.comparators, d)
+            return all(same(getattr(a, f, None), getattr(b, f, None), d) for f in a._fields)
+        if isinstance(a, list):
+            return len(a) == len(b) and all(same(x, y, depth) for x, y in zip(a, b))
+        return a == b
+
+    if not same(old, new, 0) or not out:
+        return None
+    return out
 
 
 _MUTATES = False  # set True if anything below ever mutates old_tree in place

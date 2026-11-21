@@ -12,13 +12,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-DEV = Path("/home/claude/dev")
-SRC = DEV / "sqlglot"
-PY = DEV / "venv/bin/python"
-TOOLS = DEV / "tools"
+DEV = Path(os.environ.get("LABEL_DEV", "/home/claude/dev"))
+SRC = Path(os.environ.get("LABEL_SRC", str(DEV / "sqlglot")))
+PY = Path(os.environ.get("LABEL_PY", str(DEV / "venv/bin/python")))
+TOOLS = Path(os.environ.get("LABEL_TOOLS", str(DEV / "tools")))
+JOBS = os.environ.get("LABEL_JOBS", "2")
 
 
-def run_suite(work: Path, outcome: Path, jobs: str = "2") -> dict:
+def run_suite(work: Path, outcome: Path, jobs: str = JOBS) -> dict:
     env = dict(os.environ, SKIP_INTEGRATION="0", OUTCOME_FILE=str(outcome),
                PYTHONPATH=f"{work}:{TOOLS}", PYTHONDONTWRITEBYTECODE="1")
     subprocess.run([str(PY), "-m", "pytest", "tests", "-p", "outcome_plugin",
@@ -39,7 +40,8 @@ def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="label_"))
     work = tmp / "repo"
     shutil.copytree(SRC, work, ignore=shutil.ignore_patterns(".git", "__pycache__",
-                                                              "sqlglot-integration-tests"))
+                                                              "sqlglot-integration-tests"),
+                    symlinks=True)
     pristine = tmp / "pristine"
     shutil.copytree(work, pristine)
     for p in sys.argv[3:]:

@@ -254,6 +254,10 @@ def main() -> None:
         "proc_tests": proc_bits,
         "procs": procs,
     }
+    if len(sys.argv) > 5 and os.path.exists(sys.argv[5]):
+        lm = json.loads(Path(sys.argv[5]).read_text())
+        maps["local_ms"] = lm["tests"]
+        maps["class_setup"] = {k: v for k, v in lm["class_setup"].items() if v >= 20}
     maps["sets"] = sets
     with open(out, "wb") as f:
         pickle.dump(maps, f, protocol=5)

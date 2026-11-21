@@ -1,9 +1,11 @@
-__pycache__/
 *.pyc
-output.jsonl
+*.tar.gz
 /data/
 /sample/
-*.tar.gz
+Makefile
+__pycache__/
+maps/fp_base.pkl
+output.jsonl
+run.log
 sample/
 score.py
-Makefile

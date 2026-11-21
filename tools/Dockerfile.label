@@ -1,0 +1,21 @@
+# Labels patches by running sqlglot's full test suite on each (same image and
+# packages as the scorer's labels). Build from the repo root:
+#   docker build -f tools/Dockerfile.label -t br-label .
+#   docker run --rm -e LABEL_JOBS=8 -v <dir with patches>:/work br-label
+# Writes /work/labels.json (resumable: rerun to continue).
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+RUN python - <<'PY'
+import io, tarfile, urllib.request, os, shutil
+sha = "eb11aec4be8cb2122afe713a4816662c3f0fb2fa"
+data = urllib.request.urlopen(f"https://github.com/tobymao/sqlglot/archive/{sha}.tar.gz", timeout=120).read()
+with tarfile.open(fileobj=io.BytesIO(data)) as t:
+    t.extractall("/opt", filter="data")
+os.rename(f"/opt/sqlglot-{sha}", "/opt/sqlglot")
+shutil.rmtree("/opt/sqlglot/sqlglot-integration-tests", ignore_errors=True)
+PY
+COPY requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir -r /tmp/requirements.lock
+COPY tools/label.py tools/outcome_plugin.py /label/
+COPY tests.json /label/tests.json
+ENV LABEL_SRC=/opt/sqlglot LABEL_PY=/usr/local/bin/python LABEL_TOOLS=/label LABEL_JOBS=8
+CMD ["sh", "-c", "python /label/label.py /label/tests.json /work/labels.json /work/*.patch"]

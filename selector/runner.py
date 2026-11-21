@@ -19,6 +19,8 @@ import sys
 import time
 import unittest
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
 PRELOAD = ("duckdb", "pandas", "numpy", "dateutil", "dateutil.parser", "pytz", "json",
            "decimal", "datetime", "doctest", "typing", "collections", "itertools",
            "functools", "re", "math", "unittest.mock")
@@ -110,7 +112,7 @@ def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int) -
         sys.dont_write_bytecode = True
         os.environ["PYTHONPATH"] = farm
         os.environ["SKIP_INTEGRATION"] = "0"
-        sys.path[:] = [farm] + [p for p in sys.path if p and os.path.realpath(p) != os.path.realpath(repo)]
+        sys.path[:] = [farm, _HERE] + [p for p in sys.path if p and os.path.realpath(p) != os.path.realpath(repo)]
         for name in list(sys.modules):
             if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
                 del sys.modules[name]
@@ -260,3 +262,81 @@ class LocalRunner:
             self.log(f"{st['commit']}: {bad} {'crashed' if eof else 'timed out'}")
             if left[1:]:
                 pending.insert(0, (st["commit"], st["patched"], left[1:]))
+
+
+def _fp_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int) -> None:
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    out = ["<error>"]
+    try:
+        build_farm(repo, farm, patched)
+        os.chdir(farm)
+        sys.dont_write_bytecode = True
+        sys.path[:] = [farm, _HERE] + [p for p in sys.path if p and os.path.realpath(p) != os.path.realpath(repo)]
+        for name in list(sys.modules):
+            if name in ("sqlglot", "tests") or name.startswith(("sqlglot.", "tests.")):
+                del sys.modules[name]
+        importlib.invalidate_caches()
+        import pickle
+        import fingerprint
+        with open(base_path, "rb") as f:
+            base = pickle.load(f)
+        out = fingerprint.diff(base, fingerprint.fingerprint())
+    except BaseException as e:  # noqa: BLE001
+        out = ["<error> " + repr(e)[:200]]
+    finally:
+        try:
+            os.write(wfd, (json.dumps(out[:50]) + "\n").encode())
+        finally:
+            os._exit(0)
+
+
+def fp_check_many(repo: str, tmp: str, base_path: str, jobs: list, parallel: int = 2,
+                  timeout: float = 40.0, log=None) -> dict:
+    """jobs: [(commit, patched)] -> {commit: list of changed state keys (["<error>"] on failure)}."""
+    res: dict = {}
+    pending = list(jobs)
+    active: dict = {}
+    while pending or active:
+        while pending and len(active) < parallel:
+            c, patched = pending.pop(0)
+            rfd, wfd = os.pipe()
+            farm = os.path.join(tmp, f"fp_{c}")
+            pid = os.fork()
+            if pid == 0:
+                os.close(rfd)
+                _fp_child(repo, farm, patched, base_path, wfd)
+            os.close(wfd)
+            active[rfd] = (pid, c, farm, time.monotonic() + timeout, [b""])
+        ready, _, _ = select.select(list(active), [], [], 0.5)
+        now = time.monotonic()
+        for fd in list(active):
+            pid, c, farm, deadline, buf = active[fd]
+            done = False
+            if fd in ready:
+                chunk = os.read(fd, 1 << 20)
+                if chunk:
+                    buf[0] += chunk
+                else:
+                    done = True
+            if not done and now < deadline:
+                continue
+            if not done:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+            os.close(fd)
+            shutil.rmtree(farm, ignore_errors=True)
+            try:
+                res[c] = json.loads(buf[0].decode().strip() or '["<error> empty"]')
+            except Exception:
+                res[c] = ["<error> bad output"]
+            del active[fd]
+    return res

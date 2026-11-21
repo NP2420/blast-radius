@@ -23,15 +23,17 @@ sys.path.insert(0, str(HERE))
 
 import analyze  # noqa: E402
 import patchparse  # noqa: E402
-from runner import LocalRunner, preload  # noqa: E402
+from runner import LocalRunner, fp_check_many, preload  # noqa: E402
 
 DATA = Path(os.environ.get("BR_DATA", "/data"))
 REPO = os.environ.get("BR_REPO", "/opt/sqlglot")
 MAPS = os.environ.get("BR_MAPS", str(HERE.parent / "maps" / "maps.pkl"))
+FP_BASE = os.environ.get("BR_FP_BASE", str(Path(MAPS).parent / "fp_base.pkl"))
+FP_NARROW = os.environ.get("BR_FP_NARROW", "0") == "1"
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
-LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "400"))
-CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.15"))
+LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "600"))
+CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "2.0"))
 LOCAL_BUDGET_S = float(os.environ.get("BR_LOCAL_BUDGET_S", "110"))
 NO_LOCAL = os.environ.get("BR_NO_LOCAL") == "1"
 T0 = time.monotonic()
@@ -64,7 +66,8 @@ def pack_cost(nums, ms) -> int:
     return pack(list(nums), ms)[0]
 
 
-CLASS_SETUP_MS = {"tests/test_executor.py::TestExecutor": 1100}
+CLASS_SETUP_MS = {"tests/test_executor.py::TestExecutor": 1200}  # replaced from maps when present
+LOCAL_MS: dict[int, int] = {}  # measured local CPU per test number (falls back to recorded)
 _class_of: dict[int, str] = {}
 
 
@@ -72,29 +75,54 @@ def local_cost(nums, ms) -> float:
     if not nums:
         return 0.0
     setup = sum(CLASS_SETUP_MS.get(c, 0) for c in {_class_of.get(n, "") for n in nums})
-    return LOCAL_OVERHEAD_MS + setup + CPU_FACTOR * sum(ms[n] for n in nums)
+    return LOCAL_OVERHEAD_MS + setup + CPU_FACTOR * sum(LOCAL_MS.get(n, ms[n]) for n in nums)
 
 
-def plan(cands: list[int], ms: dict[int, int]) -> tuple[list[int], list[int]]:
-    """Split candidates into (include directly, run locally)."""
+P_STRONG = float(os.environ.get("BR_P_STRONG", "0.30"))
+P_WEAK = float(os.environ.get("BR_P_WEAK", "0.01"))
+
+
+def plan(cands: list[int], ms: dict[int, int], strong: set | None = None) -> tuple[list[int], list[int]]:
+    """Split candidates into (include directly, run locally), minimising expected cost.
+
+    Expected cost = packed cost of the included set
+                  + local CPU (overhead, class setup, test time)
+                  + expected cost of tests that fail locally and get listed anyway.
+    Strong candidates (directly executed the change) fail often; weak ones rarely.
+    """
     if not cands:
         return [], []
     if NO_LOCAL:
         return list(cands), []
-    order = sorted(cands, key=lambda n: -ms[n])
+    strong = strong or set()
+    p = {n: (P_STRONG if n in strong else P_WEAK) for n in cands}
+    st = sorted((n for n in cands if n in strong), key=lambda n: -ms[n])
+    wk = sorted((n for n in cands if n not in strong), key=lambda n: -ms[n])
+
+    def expected(inc, loc):
+        c = pack_cost(inc, ms) + local_cost(loc, ms)
+        if loc:
+            ef = sum(p[n] * ms[n] for n in loc)
+            if not inc:
+                none_fail = 1.0
+                for n in loc:
+                    none_fail *= 1.0 - p[n]
+                ef += (1.0 - none_fail) * WORKER_MS
+            c += ef
+        return c
+
     best = None
-    suffix = [0] * (len(order) + 1)
-    for i in range(len(order) - 1, -1, -1):
-        suffix[i] = suffix[i + 1] + ms[order[i]]
-    for j in range(len(order) + 1):
-        inc = order[:j]
-        cost = pack_cost(inc, ms) + local_cost(order[j:], ms)
-        if best is None or cost < best[0]:
-            best = (cost, j)
-        if j > 12 and best[1] < j - 12:
-            break  # costs only rise once the heavy head is decided
-    j = best[1]
-    inc, loc = order[:j], order[j:]
+    cut_points = range(len(wk) + 1) if len(wk) <= 60 else sorted(
+        set([0, len(wk)] + [int(len(wk) * q) for q in (0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5)]
+            + list(range(0, min(len(wk), 12)))))
+    for s_split in sorted(set([0, len(st)] + list(range(0, min(len(st), 6) + 1)))):
+        for j in cut_points:
+            inc = st[:s_split] + wk[:j]
+            loc = st[s_split:] + wk[j:]
+            c = expected(inc, loc)
+            if best is None or c < best[0]:
+                best = (c, inc, loc)
+    _, inc, loc = best
     # Free riders: a local test that does not raise the packed cost goes in directly.
     if inc:
         base = pack_cost(inc, ms)
@@ -102,17 +130,29 @@ def plan(cands: list[int], ms: dict[int, int]) -> tuple[list[int], list[int]]:
         for n in loc:
             if pack_cost(inc + moved + [n], ms) <= base:
                 moved.append(n)
-        # Moving a class's last local tests also saves its setup cost.
         rest = [n for n in loc if n not in set(moved)]
         for c, setup in CLASS_SETUP_MS.items():
             cls_rest = [n for n in rest if _class_of.get(n) == c]
-            if cls_rest and pack_cost(inc + moved + cls_rest, ms) - base <= setup + CPU_FACTOR * sum(ms[n] for n in cls_rest):
+            if cls_rest and pack_cost(inc + moved + cls_rest, ms) - base <= setup + CPU_FACTOR * sum(LOCAL_MS.get(n, ms[n]) for n in cls_rest):
                 moved.extend(cls_rest)
         if moved:
-            ms_set = set(moved)
+            mset = set(moved)
             inc = inc + moved
-            loc = [n for n in loc if n not in ms_set]
+            loc = [n for n in loc if n not in mset]
     return inc, loc
+
+
+def bits_to_nums(bits: int, map_ids, num_by_id) -> set:
+    out = set()
+    n = 0
+    while bits:
+        if bits & 1:
+            tid = map_ids[n]
+            if tid in num_by_id:
+                out.add(num_by_id[tid])
+        bits >>= 1
+        n += 1
+    return out
 
 
 def main() -> None:
@@ -128,6 +168,12 @@ def main() -> None:
     with open(MAPS, "rb") as f:
         maps = pickle.load(f)
     map_ids = maps["tests"]
+    if "local_ms" in maps:
+        for tid, v in maps["local_ms"].items():
+            if tid in num_by_id:
+                LOCAL_MS[num_by_id[tid]] = v
+        CLASS_SETUP_MS.clear()
+        CLASS_SETUP_MS.update(maps["class_setup"])
     mapped = set(map_ids)
     unmapped = [num_by_id[i] for i in num_by_id if i not in mapped]
     if unmapped:
@@ -137,31 +183,56 @@ def main() -> None:
     patches = sorted((DATA / "commits").glob("*.patch"))
     decisions: dict[str, dict] = {}
     jobs = []
+    analyses = {}
     for p in patches:
         cid = p.stem
         try:
             fds = patchparse.parse(p.read_text(encoding="utf-8", errors="replace"))
             if not fds:
                 raise ValueError("empty patch")
-            res = an.analyze(fds)
+            analyses[cid] = an.analyze(fds)
         except Exception:
             log(f"{cid}: analysis error\n{traceback.format_exc()}")
-            res = analyze.Result(broad="analysis error")
+            analyses[cid] = analyze.Result(broad="analysis error")
+    for c, r in analyses.items():
+        if not FP_NARROW:  # class/module edits: heuristic sets; fingerprint only for function code
+            r.tests |= r.import_heur
+            r.import_fp = r.fp_func
+    fp_jobs = [(c, r.patched) for c, r in analyses.items() if not r.broad and r.import_fp]
+    fp: dict = {}
+    if fp_jobs:
+        if os.path.exists(FP_BASE):
+            fp = fp_check_many(REPO, TMP, FP_BASE, fp_jobs, log=log)
+        else:
+            fp = {c: ["<no baseline>"] for c, _ in fp_jobs}
+        for c, changed in fp.items():
+            r = analyses[c]
+            if not changed:
+                r.notes.append("import state unchanged")
+                continue
+            users = 0
+            for key in changed:
+                u = an.state_key_users(key)
+                if u is None or len(changed) >= 50:
+                    users = an.all_bits
+                    break
+                users |= u
+            r.tests |= users
+            r.notes.append(f"import state changed ({len(changed)}): {changed[:3]}")
+    # Commits without a fingerprint verdict keep the heuristic import-time sets.
+    for c, r in analyses.items():
+        if not r.broad and r.import_fp and c not in fp:
+            r.tests |= r.import_heur
+    for p in patches:
+        cid = p.stem
+        res = analyses[cid]
         if res.broad:
             decisions[cid] = {"include": all_nums, "local": [], "broad": res.broad}
             log(f"{cid}: BROAD ({res.broad})")
             continue
-        bits = res.tests
-        cands = set(unmapped)
-        n = 0
-        while bits:
-            if bits & 1:
-                tid = map_ids[n]
-                if tid in num_by_id:
-                    cands.add(num_by_id[tid])
-            bits >>= 1
-            n += 1
-        inc, loc = plan(sorted(cands), ms)
+        cands = set(unmapped) | bits_to_nums(res.tests, map_ids, num_by_id)
+        strong = bits_to_nums(res.strong, map_ids, num_by_id)
+        inc, loc = plan(sorted(cands), ms, strong)
         decisions[cid] = {"include": inc, "local": loc, "patched": res.patched}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")
@@ -188,7 +259,10 @@ def main() -> None:
         total += cost
         sys.stdout.write(json.dumps({"commit": cid, "workers": workers}) + "\n")
     sys.stdout.flush()
-    log(f"done: {len(patches)} commits, packed cost {total / 1000:.1f} s")
+    import resource
+    ru_s, ru_c = resource.getrusage(resource.RUSAGE_SELF), resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = ru_s.ru_utime + ru_s.ru_stime + ru_c.ru_utime + ru_c.ru_stime
+    log(f"done: {len(patches)} commits, packed cost {total / 1000:.1f} s, cpu {cpu:.2f} s")
 
 
 if __name__ == "__main__":

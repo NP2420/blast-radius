@@ -20,6 +20,10 @@ INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
 @dataclass
 class Result:
     tests: int = 0                                 # bitset over map test indexes
+    strong: int = 0                                # direct evidence: executed the changed statement / read the file
+    import_fp: bool = False                        # touches code run at import: check state fingerprint
+    import_heur: int = 0                           # import-time candidates by heuristics (used if no fingerprint)
+    fp_func: bool = False                          # function code that also runs at import changed
     broad: str | None = None                       # reason, if we must run everything
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
@@ -116,6 +120,7 @@ class Analyzer:
         t = self.opens(path)
         if t:
             res.tests |= t
+            res.strong |= t
             res.notes.append(f"{path}: {bin(t).count('1')} readers")
             return
         if path.startswith(INERT_PREFIXES) or path.endswith(INERT_SUFFIXES):
@@ -144,7 +149,6 @@ class Analyzer:
             return
         # Text readers of the source (inspect.getsource, subprocess tools).
         res.tests |= self.opens(path)
-        res.tests |= self.m["proc_tests"]
         if ast.dump(old_tree) == ast.dump(new_tree):
             res.notes.append(f"{path}: AST unchanged")
             return
@@ -180,15 +184,18 @@ class Analyzer:
                 # Only the statement's own lines (compound statements: header only).
                 lines = old_idx.own_lines(stmt) if stmt is not None else [ln]
                 imp = self.m["import_lines"].get(path, ())
+                direct = self.cov_lines(path, lines) | self.collect_lines(path, lines)
+                res.tests |= direct
+                res.strong |= direct
                 if any(x in imp for x in lines):
-                    # Function code that runs during import (metaclasses, table
-                    # builders): its effect is baked into module state that any
-                    # test may read. Every test is a candidate; the planner decides.
-                    res.tests |= self.all_bits
+                    # Function code that also runs during import (metaclasses, table
+                    # builders, parsing at import): if the patched import builds
+                    # different state, every test is a candidate (decided later
+                    # by fingerprinting the patched import).
+                    res.import_fp = True
+                    res.fp_func = True
+                    res.tests |= self.m["proc_tests"]
                     res.notes.append(f"{path}:{ln} import-time function code")
-                else:
-                    res.tests |= self.cov_lines(path, lines)
-                    res.tests |= self.collect_lines(path, lines)
             else:
                 self._import_time(path, module, kind, old_idx, ln, res, tree="old")
 
@@ -202,9 +209,44 @@ class Analyzer:
                 res.tests |= self.cov_lines(path, rng) | self.collect_lines(path, rng)
                 imp = self.m["import_lines"].get(path, ())
                 if any(x in imp for x in range(fn.body[0].lineno, (fn.end_lineno or fn.lineno) + 1)):
-                    res.tests |= self.all_bits
+                    res.import_fp = True
+                    res.fp_func = True
             else:
                 res.tests |= self._func_by_name(path, kind[2])
+            return
+        if path.startswith("sqlglot/"):
+            # Tests that spawn a fresh interpreter (import sqlglot) observe import-time behaviour.
+            res.tests |= self.m["proc_tests"]
+        if k in ("class", "module") and tree == "old":
+            # Code inside the statement that runs later (lambda / comprehension
+            # bodies in tables): tests that executed it at run time.
+            node = idx.stmt_at(ln)
+            span = [ln]
+            if node is not None:
+                for sub in ast.walk(node):
+                    if isinstance(sub, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                        a0, b0 = sub.lineno, getattr(sub, "end_lineno", sub.lineno) or sub.lineno
+                        if a0 <= ln <= b0:
+                            span = list(range(a0, b0 + 1))
+            direct = self.cov_lines(path, span)
+            res.tests |= direct
+            res.strong |= direct
+        if path.startswith("sqlglot/") and k in ("class", "module"):
+            # Import-time state change: the fingerprint of the patched import says
+            # exactly which attributes changed; these heuristics are the fallback.
+            before = res.tests
+            res.tests = 0
+            self._import_time_heur(path, module, kind, idx, ln, res, tree)
+            res.import_heur |= res.tests
+            res.tests = before
+            res.import_fp = True
+            return
+        self._import_time_heur(path, module, kind, idx, ln, res, tree)
+
+    def _import_time_heur(self, path, module, kind, idx, ln, res: Result, tree: str) -> None:
+        k = kind[0]
+        if k == "funchead":
+            self._import_time(path, module, kind, idx, ln, res, tree)
             return
         if k == "class":
             qual = kind[2]
@@ -239,6 +281,35 @@ class Analyzer:
             res.notes.append(f"{path}:{ln} module level")
             return
         res.broad = f"unresolved scope {path}:{ln}"
+
+    def state_key_users(self, key: str) -> int | None:
+        """Tests that can observe a changed import-time state entry; None = unknown."""
+        if key.startswith("global:") or key.startswith("<"):
+            return None
+        module, _, qual = key.partition(":")
+        parts = qual.split(".")
+        path = module.replace(".", "/") + ".py"
+        if path not in self.m["funcs"]:
+            path = module.replace(".", "/") + "/__init__.py"
+        bits = 0
+        refs = self.m.get("attr_refs", {})
+        # Longest class prefix that tests used (receivers) or that is a known class.
+        for i in range(len(parts) - 1, 0, -1):
+            cls = ".".join(parts[:i])
+            ck = f"{module}:{cls}"
+            if ck in self.m["recv"] or any(q.startswith(cls + ".") for q, _, _ in self.m["funcs"].get(path, [])):
+                attr = parts[i]
+                bits |= self.recv(ck)
+                bits |= self._class_methods_cov(path, cls)
+                for kk in (f"{cls}.{attr}", f"{parts[i - 1]}.{attr}"):
+                    sid = refs.get(kk)
+                    if sid is not None:
+                        bits |= self.sets[sid]
+                return bits
+        name = parts[0]
+        bits |= self._name_users({name})
+        bits |= self.recv(f"{module}:{name}")  # a module-level class object itself
+        return bits
 
     def _func_by_name(self, path: str, qual: str) -> set:
         # Coverage of an old function with the same qualified name, if any.

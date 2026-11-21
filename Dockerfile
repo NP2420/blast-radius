@@ -24,6 +24,9 @@ RUN pip install -r /app/requirements.lock
 COPY selector /app/selector
 COPY maps /app/maps
 
+# Fingerprint of sqlglot's import-time state, made in this exact environment.
+RUN python /app/selector/fingerprint.py /opt/sqlglot /app/maps/fp_base.pkl
+
 # Precompile so imports at run time read .pyc; make everything readable by nobody.
 RUN python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests /app/selector \
     && chmod -R a+rX /opt/sqlglot /app

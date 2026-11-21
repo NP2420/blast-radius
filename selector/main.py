@@ -32,11 +32,11 @@ FP_BASE = os.environ.get("BR_FP_BASE", str(Path(MAPS).parent / "fp_base.pkl"))
 FP_NARROW = os.environ.get("BR_FP_NARROW", "0") == "1"
 EQUIV = os.environ.get("BR_EQUIV", "1") == "1"
 # Heavy tests (>= HEAVY_MS) are listed only with strong evidence (diagnostic / policy).
-DROP_WEAK_HEAVY = os.environ.get("BR_DROP_WEAK_HEAVY", "1") == "1"
+DROP_WEAK_HEAVY = os.environ.get("BR_DROP_WEAK_HEAVY", "0") == "1"
 HEAVY_MS = int(os.environ.get("BR_HEAVY_MS", "1000"))
 EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "500"))
 # Per-query runs of heavy executor tests (tpcds); off by default.
-TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "0") == "1"
+TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "1") == "1"
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
 LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "300"))
@@ -204,9 +204,9 @@ def main() -> None:
             log(f"{cid}: analysis error\n{traceback.format_exc()}")
             analyses[cid] = analyze.Result(broad="analysis error")
     for c, r in analyses.items():
-        if not FP_NARROW:  # class/module edits: heuristic sets; fingerprint only for function code
+        if not FP_NARROW:  # class/module edits: heuristic sets, fingerprint as a ripple guard
             r.tests |= r.import_heur
-            r.import_fp = r.fp_func
+            r.import_fp = r.fp_func or r.state_guard
     fp_jobs = [(c, r.patched) for c, r in analyses.items() if not r.broad and r.import_fp]
     fp: dict = {}
     if fp_jobs:

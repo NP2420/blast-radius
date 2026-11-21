@@ -25,12 +25,14 @@ class Result:
     strong: int = 0                                # direct evidence: executed the changed statement / read the file
     medium: int = 0                                # read the changed class attribute by name (line level)
     strong_lines: list = field(default_factory=list)  # (path, lines) behind strong evidence
+    file_readers: int = 0                          # tests that read a changed data file (not line-level)
     medium_names: set = field(default_factory=set)    # attribute names behind medium evidence
     import_fp: bool = False                        # touches code run at import: check state fingerprint
     import_heur: int = 0                           # import-time candidates by heuristics (used if no fingerprint)
     fp_func: bool = False                          # function code that also runs at import changed
     equiv: bool = False                            # every code change is an is/== swap against None/enum
-    key_attrs: set = field(default_factory=set)    # tables edited at key level (expected to differ in fingerprint)
+    key_attrs: set = field(default_factory=set)    # names edited at import level (expected to differ in fingerprint)
+    state_guard: bool = False                      # class/module edit: fingerprint ripple check required
     broad: str | None = None                       # reason, if we must run everything
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
@@ -170,6 +172,7 @@ class Analyzer:
         if t:
             res.tests |= t
             res.strong |= t
+            res.file_readers |= t
             res.notes.append(f"{path}: {bin(t).count('1')} readers")
             return
         if path.startswith(INERT_PREFIXES) or path.endswith(INERT_SUFFIXES):
@@ -292,14 +295,17 @@ class Analyzer:
             res.strong |= direct
             res.strong_lines.append((path, list(span)))
         if path.startswith("sqlglot/") and k in ("class", "module"):
-            # Import-time state change: the fingerprint of the patched import says
-            # exactly which attributes changed; these heuristics are the fallback.
+            # Import-time state change. Heuristic candidates are the base; the
+            # fingerprint of the patched import guards against ripples (state that
+            # changes beyond the edited names: other modules' tables, import errors).
             before = res.tests
             res.tests = 0
             self._import_time_heur(path, module, kind, idx, ln, res, tree)
             res.import_heur |= res.tests
             res.tests = before
             res.import_fp = True
+            res.state_guard = True
+            res.key_attrs |= idx.names_assigned(ln)
             return
         self._import_time_heur(path, module, kind, idx, ln, res, tree)
 
@@ -435,6 +441,13 @@ class Analyzer:
         self._last_key_attr = attr
         return out
 
+    def opens_any(self, res: "Result", bit: int) -> bool:
+        """Does the test read any patched file as text (source or data)?"""
+        for path in res.patched:
+            if self.opens(path) & bit:
+                return True
+        return False
+
     def _alias_closure(self, names: set) -> set:
         todo, seen = list(names), set()
         while todo:
@@ -457,6 +470,8 @@ class Analyzer:
             bit = 1 << self.m["tests"].index(tid)
         except ValueError:
             return None
+        if res.file_readers & bit or self.opens_any(res, bit):
+            return None  # evidence is a file the test reads, not lines it runs
         q = 0
 
         def take(path, ln):

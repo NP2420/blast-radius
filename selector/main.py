@@ -31,11 +31,11 @@ MAPS = os.environ.get("BR_MAPS", str(HERE.parent / "maps" / "maps.pkl"))
 FP_BASE = os.environ.get("BR_FP_BASE", str(Path(MAPS).parent / "fp_base.pkl"))
 FP_NARROW = os.environ.get("BR_FP_NARROW", "0") == "1"
 EQUIV = os.environ.get("BR_EQUIV", "1") == "1"
-EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "1000"))
+EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "500"))
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
-LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "600"))
-CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "2.0"))
+LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "300"))
+CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.0"))
 LOCAL_BUDGET_S = float(os.environ.get("BR_LOCAL_BUDGET_S", "110"))
 NO_LOCAL = os.environ.get("BR_NO_LOCAL") == "1"
 T0 = time.monotonic()
@@ -237,27 +237,55 @@ def main() -> None:
         cands = set(unmapped) | bits_to_nums(res.tests, map_ids, num_by_id)
         strong = bits_to_nums(res.strong, map_ids, num_by_id)
         medium = bits_to_nums(res.medium, map_ids, num_by_id)
+        # Heavy executor tests with per-query maps: run only the queries that can
+        # observe the change (or drop the test when none can).
+        allowed: dict = {}
+        saved_local = {}
+        for tid in maps.get("task_cov", {}):
+            n_ = num_by_id.get(tid)
+            if n_ is None or n_ not in cands:
+                continue
+            qbits = an.partial_queries(tid, res, n_ in strong, n_ in medium)
+            if qbits is None:
+                continue
+            if qbits == 0 and not (res.tests & ~(res.strong | res.medium) & (1 << map_ids.index(tid))):
+                cands.discard(n_)
+                res.notes.append(f"{tid.split('::')[-1]}: no query reaches the change")
+                continue
+            if qbits == 0:
+                continue
+            qs = {i for i in range(maps["task_cov"][tid]["n"]) if qbits >> i & 1}
+            allowed[tid] = qs
+            saved_local[n_] = LOCAL_MS.get(n_, ms[n_])
+            LOCAL_MS[n_] = int(300 + saved_local[n_] * len(qs) / max(1, maps["task_cov"][tid]["n"]))
+            res.notes.append(f"{tid.split('::')[-1]}: {len(qs)} queries")
         cond: list[int] = []
         if EQUIV and res.equiv and cands:
             # Swap with no semantic effect: probe with cheap candidates (strong first);
             # list the rest only if a probe fails.
-            order = sorted(cands, key=lambda n: (n not in strong, LOCAL_MS.get(n, ms[n])))
-            probe, budget = [], EQUIV_PROBE_MS
+            order = sorted((n for n in cands if n in strong), key=lambda n: LOCAL_MS.get(n, ms[n]))
+            probe, budget, classes = [], EQUIV_PROBE_MS, set()
             for n in order:
                 c = LOCAL_MS.get(n, ms[n])
-                if c <= budget and c <= 1000:
+                k = _class_of.get(n, "")
+                if k not in classes:
+                    c += CLASS_SETUP_MS.get(k, 0)
+                if c <= budget:
                     probe.append(n)
                     budget -= c
+                    classes.add(k)
             cond = [n for n in cands if n not in set(probe)]
             inc, loc = [], probe
             res.notes.append(f"equiv: probe {len(probe)}, conditional {len(cond)}")
         else:
             inc, loc = plan(sorted(cands), ms, strong, medium)
+        LOCAL_MS.update(saved_local)
+        allowed = {t: q for t, q in allowed.items() if num_by_id[t] in set(loc)}
         decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")
         if loc:
-            jobs.append((cid, res.patched, [id_by_num[x] for x in loc]))
+            jobs.append((cid, res.patched, [id_by_num[x] for x in loc], allowed))
 
     results: dict[str, dict[str, bool]] = {}
     if jobs:

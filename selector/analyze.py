@@ -23,6 +23,8 @@ class Result:
     tests: int = 0                                 # bitset over map test indexes
     strong: int = 0                                # direct evidence: executed the changed statement / read the file
     medium: int = 0                                # read the changed class attribute by name (line level)
+    strong_lines: list = field(default_factory=list)  # (path, lines) behind strong evidence
+    medium_names: set = field(default_factory=set)    # attribute names behind medium evidence
     import_fp: bool = False                        # touches code run at import: check state fingerprint
     import_heur: int = 0                           # import-time candidates by heuristics (used if no fingerprint)
     fp_func: bool = False                          # function code that also runs at import changed
@@ -237,6 +239,7 @@ class Analyzer:
                 direct = self.cov_lines(path, lines) | self.collect_lines(path, lines)
                 res.tests |= direct
                 res.strong |= direct
+                res.strong_lines.append((path, list(lines)))
                 if any(x in imp for x in lines):
                     # Function code that also runs during import (metaclasses, table
                     # builders, parsing at import): if the patched import builds
@@ -281,6 +284,7 @@ class Analyzer:
             direct = self.cov_lines(path, span)
             res.tests |= direct
             res.strong |= direct
+            res.strong_lines.append((path, list(span)))
         if path.startswith("sqlglot/") and k in ("class", "module"):
             # Import-time state change: the fingerprint of the patched import says
             # exactly which attributes changed; these heuristics are the fallback.
@@ -305,6 +309,7 @@ class Analyzer:
             if narrowed is not None:
                 res.tests |= narrowed
                 res.medium |= narrowed
+                res.medium_names |= self._alias_closure(idx.names_assigned(ln))
                 res.notes.append(f"{path}:{ln} attr-narrowed {qual}")
             else:
                 res.tests |= self.recv(f"{module}:{qual}")
@@ -366,6 +371,55 @@ class Analyzer:
         bits |= self._name_users({name})
         bits |= self.recv(f"{module}:{name}")  # a module-level class object itself
         return bits
+
+    def _alias_closure(self, names: set) -> set:
+        todo, seen = list(names), set()
+        while todo:
+            n = todo.pop()
+            if n not in seen:
+                seen.add(n)
+                todo.extend(self.m.get("aliases", {}).get(n, ()))
+        return seen
+
+    def partial_queries(self, tid: str, res: "Result", is_strong: bool, is_medium: bool) -> int | None:
+        """Bitmask of queries of a heavy executor test that can observe the change.
+
+        None: the test must run whole (change reaches code outside per-query work,
+        or the evidence is not line-level).
+        """
+        tc = self.m.get("task_cov", {}).get(tid)
+        if tc is None or not (is_strong or is_medium) or res.import_fp:
+            return None
+        try:
+            bit = 1 << self.m["tests"].index(tid)
+        except ValueError:
+            return None
+        q = 0
+
+        def take(path, ln):
+            # Line the test executes: must be per-query work, else run whole.
+            if not (self.cov_lines(path, [ln]) & bit):
+                return True  # the test never runs this line
+            if ln in tc["rest"].get(path, ()) or (path, ln) not in tc["q"]:
+                return False  # setUpClass / outside per-query work
+            nonlocal q
+            q |= tc["q"][(path, ln)]
+            return True
+
+        if is_strong:
+            for path, lines in res.strong_lines:
+                if self.collect_lines(path, lines) & bit:
+                    return None  # reached through module state built at collection
+                for ln in lines:
+                    if not take(path, ln):
+                        return None
+        if is_medium:
+            pos = self.m.get("task_name_pos", {})
+            for n in res.medium_names:
+                for (path, ln) in pos.get(n, ()):
+                    if not take(path, ln):
+                        return None
+        return q
 
     def _attr_narrow(self, module: str, qual: str, names: set) -> int | None:
         """Tests that use class `qual` AND run code that reads one of `names`.

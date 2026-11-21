@@ -10,14 +10,24 @@ import concurrent.futures as cf
 import pickle
 
 
+ALLOWED = [None]  # set of submission indices to run for the current test; None = all
+
+
 class SyncExecutor(cf.Executor):
     def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=(), **kwargs):
         self._shutdown = False
+        self._n = 0
         if initializer is not None:
             initializer(*initargs)
 
     def submit(self, fn, /, *args, **kwargs):
         fut = cf.Future()
+        idx = getattr(self, "_n", 0)
+        self._n = idx + 1
+        allowed = ALLOWED[0]
+        if allowed is not None and idx not in allowed:
+            fut.set_result(None)  # executor tests skip queries whose result is None
+            return fut
         try:
             fn_, args_, kwargs_ = pickle.loads(pickle.dumps((fn, args, kwargs)))
             res = fn_(*args_, **kwargs_)

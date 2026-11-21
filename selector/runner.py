@@ -69,6 +69,10 @@ class _Result(unittest.TestResult):
     def startTest(self, test):
         super().startTest(test)
         self.cur_fail = False
+        sp = getattr(self, "syncpool", None)
+        if sp is not None:
+            a = getattr(self, "allowed", {}).get(getattr(test, "_bt_id", None))
+            sp.ALLOWED[0] = set(a) if a is not None else None
 
     def _fail(self):
         self.cur_fail = True
@@ -101,7 +105,7 @@ class _Result(unittest.TestResult):
         os.write(self.out, (json.dumps(obj) + "\n").encode())
 
 
-def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int) -> None:
+def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int, allowed: dict | None = None) -> None:
     devnull = os.open(os.devnull, os.O_RDWR)
     os.dup2(devnull, 0)
     os.dup2(devnull, 1)
@@ -120,6 +124,8 @@ def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int) -
         import syncpool
         syncpool.install()
         result = _Result(wfd)
+        result.allowed = allowed or {}
+        result.syncpool = syncpool
         # Group by module and class, keeping order.
         groups: dict[tuple, list] = {}
         for tid in test_ids:
@@ -175,8 +181,8 @@ class LocalRunner:
 
         Tests with no entry when the budget runs out are unknown (caller includes them).
         """
-        results: dict[str, dict[str, bool]] = {c: {} for c, _, _ in jobs}
-        pending = [(c, p, list(t)) for c, p, t in jobs if t]
+        results: dict[str, dict[str, bool]] = {j[0]: {} for j in jobs}
+        pending = [(j[0], j[1], list(j[2])) + ((j[3],) if len(j) > 3 else ()) for j in jobs if j[2]]
         active: dict[int, dict] = {}  # rfd -> state
         stop_at = time.monotonic() + budget_s
         while pending or active:
@@ -193,8 +199,8 @@ class LocalRunner:
                     shutil.rmtree(st["farm"], ignore_errors=True)
                 break
             while pending and len(active) < parallel:
-                c, p, tids = pending.pop(0)
-                self._spawn(active, c, p, tids)
+                job = pending.pop(0)
+                self._spawn(active, job[0], job[1], job[2], job[3] if len(job) > 3 else None)
             fds = list(active)
             now = time.monotonic()
             timeout = max(0.0, min(min(st["deadline"] for st in active.values()), stop_at) - now)
@@ -228,16 +234,16 @@ class LocalRunner:
                     self._finish(active, fd, results, pending, eof=False)
         return results
 
-    def _spawn(self, active, commit, patched, tids):
+    def _spawn(self, active, commit, patched, tids, allowed=None):
         rfd, wfd = os.pipe()
         farm = os.path.join(self.tmp, f"w_{commit}_{len(tids)}_{int(time.monotonic() * 1000) % 100000}")
         pid = os.fork()
         if pid == 0:
             os.close(rfd)
-            _child(self.repo, farm, patched, tids, wfd)
+            _child(self.repo, farm, patched, tids, wfd, allowed)
         os.close(wfd)
         # First test also absorbs import time.
-        active[rfd] = {"pid": pid, "commit": commit, "patched": patched, "left": list(tids),
+        active[rfd] = {"pid": pid, "commit": commit, "patched": patched, "left": list(tids), "allowed": allowed,
                        "buf": b"", "farm": farm,
                        "deadline": time.monotonic() + 15.0 + self.limit(tids[0])}
 
@@ -261,7 +267,7 @@ class LocalRunner:
             results[st["commit"]][bad] = True
             self.log(f"{st['commit']}: {bad} {'crashed' if eof else 'timed out'}")
             if left[1:]:
-                pending.insert(0, (st["commit"], st["patched"], left[1:]))
+                pending.insert(0, (st["commit"], st["patched"], left[1:], st.get("allowed")))
 
 
 def _fp_child(repo: str, farm: str, patched: dict, base_path: str, wfd: int) -> None:

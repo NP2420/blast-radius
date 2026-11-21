@@ -320,7 +320,7 @@ def main() -> None:
         for m in seen_m:
             if m in mod_file:
                 bits |= file_tests.get(mod_file[m], 0)
-        if afile == "?" or not bits:
+        if afile == "?":
             bits = (1 << len(ids)) - 1  # unattributed collection work: everyone
         for path, lines in files.items():
             fm = collect.setdefault(path, {})
@@ -356,6 +356,44 @@ def main() -> None:
         lm = json.loads(Path(sys.argv[5]).read_text())
         maps["local_ms"] = lm["tests"]
         maps["class_setup"] = {k: v for k, v in lm["class_setup"].items() if v >= 20}
+    if len(sys.argv) > 6 and os.path.exists(sys.argv[6]):
+        tc = json.loads(Path(sys.argv[6]).read_text())
+        task_cov = {}
+        for tid, v in tc.items():
+            qm = {}
+            for path, d in v["q"].items():
+                for ln, qs in d.items():
+                    bits_q = 0
+                    for qi in qs:
+                        bits_q |= 1 << qi
+                    qm[(path, int(ln))] = bits_q
+            task_cov[tid] = {"n": v["n"], "rest": {p_: set(l_) for p_, l_ in v["rest"].items()}, "q": qm}
+        maps["task_cov"] = task_cov
+        # positions of names on lines these tests execute (for attribute-level narrowing)
+        lines_needed = set()
+        for tid in task_cov:
+            ti = idx.get(tid)
+            if ti is None:
+                continue
+            for path_, fm_ in cov.items():
+                for ln_, b_ in fm_.items():
+                    if b_ >> ti & 1:
+                        lines_needed.add((path_, ln_))
+        pos: dict = {}
+        for path in {p_ for p_, _ in lines_needed}:
+            try:
+                tree = ast.parse(Path(repo, path).read_text(encoding="utf-8"))
+            except (SyntaxError, OSError):
+                continue
+            for sub in ast.walk(tree):
+                nm = sub.attr if isinstance(sub, ast.Attribute) else sub.id if isinstance(sub, ast.Name) else (
+                    sub.value if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and sub.value.isidentifier() else None)
+                if nm is None or not hasattr(sub, "lineno"):
+                    continue
+                for ln in range(sub.lineno, (getattr(sub, "end_lineno", None) or sub.lineno) + 1):
+                    if (path, ln) in lines_needed:
+                        pos.setdefault(nm, set()).add((path, ln))
+        maps["task_name_pos"] = pos
     maps["sets"] = sets
     with open(out, "wb") as f:
         pickle.dump(maps, f, protocol=5)

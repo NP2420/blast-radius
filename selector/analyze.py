@@ -17,6 +17,15 @@ from patchparse import ApplyError, FileDiff, apply
 # file-open map at build time). Anything else unknown is "broad".
 INERT_PREFIXES = ("benchmarks/", "posts/", "pdoc/", "docs/", ".github/", "sqlglot-integration-tests/")
 INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
+# Repository metadata nobody imports or reads during tests (no pytest settings live in
+# pyproject.toml or setup.cfg at the pinned commit). Readers in the maps still win.
+ROOT_INERT = {".gitignore", ".gitmodules", ".gitattributes", ".gitpod.yml", ".pre-commit-config.yaml",
+              "LICENSE", "MANIFEST.in", "Makefile", "pyproject.toml", "setup.cfg", "setup.py",
+              "sqlglot/py.typed"}
+
+
+def _root_inert(path: str) -> bool:
+    return path in ROOT_INERT
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
 MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
@@ -261,7 +270,7 @@ class Analyzer:
             res.file_readers |= t
             res.notes.append(f"{path}: {bin(t).count('1')} readers")
             return
-        if path.startswith(INERT_PREFIXES) or path.endswith(INERT_SUFFIXES):
+        if path.startswith(INERT_PREFIXES) or path.endswith(INERT_SUFFIXES) or _root_inert(path):
             res.notes.append(f"{path}: inert")
             return
         if path.startswith("tests/fixtures/"):
@@ -274,7 +283,7 @@ class Analyzer:
     def _python(self, path: str, old: str, new: str, fd: FileDiff, res: Result) -> None:
         if not (path.startswith("sqlglot/") or path.startswith("tests/")):
             t = self.opens(path)
-            if path.startswith(INERT_PREFIXES) and not t and path not in self.m["parent_opens"]:
+            if (path.startswith(INERT_PREFIXES) or _root_inert(path)) and not t and path not in self.m["parent_opens"]:
                 res.notes.append(f"{path}: inert python")
                 return
             res.broad = f"python outside package {path}"

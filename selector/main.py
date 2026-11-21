@@ -104,7 +104,7 @@ P_MEDIUM = float(os.environ.get("BR_P_MEDIUM", "0.15"))
 P_BY_SIZE = os.environ.get("BR_P_BY_SIZE", "1") == "1"
 
 
-P_SCALE = float(os.environ.get("BR_P_SCALE", "0.6"))
+P_SCALE = float(os.environ.get("BR_P_SCALE", "0.4"))
 
 
 P_SCALE_FILE = os.environ.get("BR_P_SCALE_FILE", "1.0")

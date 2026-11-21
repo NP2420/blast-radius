@@ -32,6 +32,8 @@ FP_BASE = os.environ.get("BR_FP_BASE", str(Path(MAPS).parent / "fp_base.pkl"))
 FP_NARROW = os.environ.get("BR_FP_NARROW", "0") == "1"
 EQUIV = os.environ.get("BR_EQUIV", "1") == "1"
 EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "500"))
+# Per-query runs of heavy executor tests (tpcds). Off while a practice miss is isolated.
+TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "0") == "1"
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
 LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "300"))
@@ -241,7 +243,7 @@ def main() -> None:
         # observe the change (or drop the test when none can).
         allowed: dict = {}
         saved_local = {}
-        for tid in maps.get("task_cov", {}):
+        for tid in (maps.get("task_cov", {}) if TASK_PARTIAL else {}):
             n_ = num_by_id.get(tid)
             if n_ is None or n_ not in cands:
                 continue

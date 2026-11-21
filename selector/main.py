@@ -106,6 +106,21 @@ def p_of(kind: str, n: int) -> float:
     return min(0.97, sc * _p_of(kind, n))
 
 
+P_ANY = os.environ.get("BR_P_ANY", "1") == "1"
+
+
+def a_of(kind: str, n: int) -> float:
+    """Odds that at least one test of an evidence group fails (labeled commits)."""
+    sc = float(P_SCALE_FILE) if (kind == "file" and P_SCALE_FILE) else P_SCALE
+    if kind == "file":
+        base = 0.85 if n <= 3 else 0.6
+    elif kind == "strong":
+        base = 0.8 if n == 1 else 0.65 if n <= 50 else 0.35
+    else:
+        base = 0.45 if n <= 3 else 0.6 if n <= 10 else 0.35
+    return min(0.97, sc * base)
+
+
 def _p_of(kind: str, n: int) -> float:
     if kind == "file":
         return 0.85 if n <= 3 else 0.3 if n <= 10 else 0.05
@@ -117,7 +132,7 @@ def _p_of(kind: str, n: int) -> float:
 
 
 def plan(cands: list[int], ms: dict[int, int], strong: set | None = None, medium: set | None = None,
-         pmap: dict | None = None) -> tuple[list[int], list[int]]:
+         pmap: dict | None = None, groups: list | None = None) -> tuple[list[int], list[int]]:
     """Split candidates into (include directly, run locally), minimising expected cost.
 
     Expected cost = packed cost of the included set
@@ -143,9 +158,23 @@ def plan(cands: list[int], ms: dict[int, int], strong: set | None = None, medium
         if loc:
             ef = sum(p[n] * ms[n] for n in loc)
             if not inc:
-                none_fail = 1.0
-                for n in loc:
-                    none_fail *= 1.0 - p[n]
+                if groups is not None:
+                    # Failures within one commit are correlated: use per-group odds that
+                    # any test of the group fails, scaled by the share of it run locally.
+                    none_fail = 1.0
+                    ls = set(loc)
+                    rest = set(loc)
+                    for members, a_any in groups:
+                        k = len(members & ls)
+                        if k:
+                            none_fail *= 1.0 - min(1.0, a_any * k / len(members))
+                            rest -= members
+                    for n in rest:
+                        none_fail *= 1.0 - p[n]
+                else:
+                    none_fail = 1.0
+                    for n in loc:
+                        none_fail *= 1.0 - p[n]
                 ef += (1.0 - none_fail) * WORKER_MS
             c += ef
         return c
@@ -327,10 +356,15 @@ def main() -> None:
                 st_ = (strong - files) & cands
                 md_ = (medium - strong - files) & cands
                 pmap = {}
+                groups = [] if P_ANY else None
                 for kind, S in (("medium", md_), ("strong", st_), ("file", files)):
                     for n in S:
                         pmap[n] = max(pmap.get(n, 0.0), p_of(kind, len(S)))
-            inc, loc = plan(sorted(cands), ms, strong, medium, pmap)
+                    if S and groups is not None:
+                        groups.append((set(S), a_of(kind, len(S))))
+            else:
+                groups = None
+            inc, loc = plan(sorted(cands), ms, strong, medium, pmap, groups)
         LOCAL_MS.update(saved_local)
         allowed = {t: sorted(q) for t, q in allowed.items() if num_by_id[t] in set(loc)}
         decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}

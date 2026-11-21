@@ -34,6 +34,7 @@ CLASS_HEADER_NAME = os.environ.get("BR_CLASS_HEADER_NAME", "1") == "1"
 KEEP_TREES = os.environ.get("BR_KEEP_TREES", "0") == "1"
 PURE_INSERT = os.environ.get("BR_PURE_INSERT", "1") == "1"
 STRUCT = os.environ.get("BR_STRUCT", "1") == "1"
+SKIP_BLANK_PINS = os.environ.get("BR_SKIP_BLANK_PINS", "1") == "1"
 
 
 @dataclass
@@ -344,7 +345,9 @@ class Analyzer:
             if not kinds:
                 continue  # comment/blank lines only
             for nb in (after, after + 1):
-                if nb >= 1:
+                # Pin to neighbouring statements; blank or comment lines at module
+                # level carry no behaviour (the inserted code is resolved below).
+                if nb >= 1 and not (SKIP_BLANK_PINS and old_idx.stmt_at(nb) is None):
                     targets.append(("old", nb))
             if any(k[0] != "func" for k in kinds):
                 for n in new_lines:

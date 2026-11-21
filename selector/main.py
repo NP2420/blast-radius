@@ -85,7 +85,8 @@ def local_cost(nums, ms) -> float:
     if not nums:
         return 0.0
     setup = sum(CLASS_SETUP_MS.get(c, 0) for c in {_class_of.get(n, "") for n in nums})
-    return LOCAL_OVERHEAD_MS + setup + CPU_FACTOR * sum(LOCAL_MS.get(n, ms[n]) for n in nums)
+    return LOCAL_OVERHEAD_MS + setup + sum(
+        (HEAVY_CPU_FACTOR if ms[n] >= HEAVY_LOCAL_MS else CPU_FACTOR) * LOCAL_MS.get(n, ms[n]) for n in nums)
 
 
 P_STRONG = float(os.environ.get("BR_P_STRONG", "0.30"))
@@ -112,6 +113,7 @@ P_ANY = os.environ.get("BR_P_ANY", "0") == "1"
 # changed the board's simulated time but cost CPU.
 P_SCALE_CHEAP = os.environ.get("BR_P_SCALE_CHEAP", "0.8")
 HEAVY_LOCAL_MS = int(os.environ.get("BR_HEAVY_LOCAL_MS", "3000"))
+HEAVY_CPU_FACTOR = float(os.environ.get("BR_HEAVY_CPU_FACTOR", os.environ.get("BR_CPU_FACTOR", "1.5")))
 
 
 def a_of(kind: str, n: int) -> float:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -198,21 +199,26 @@ class Analyzer:
             res.broad = f"python outside package {path}"
             return
         try:
-            old_tree = ast.parse(old)
+            cache = self.__dict__.setdefault("_old_cache", {})
+            if path not in cache or cache[path][0] != old:
+                ot = ast.parse(old)
+                cache[path] = (old, ot, None)
+            old_tree, old_dump = cache[path][1], cache[path][2]
+            old_tree = ast.parse(old) if _MUTATES else old_tree
             new_tree = ast.parse(new)
             # Full compile: catches errors ast.parse accepts (misplaced __future__
             # imports, return outside function, bad nonlocal...). Such a module
             # cannot be imported at all.
-            compile(new, path, "exec", dont_inherit=True)
+            compile(new_tree, path, "exec", dont_inherit=True)
         except (SyntaxError, ValueError):
             res.broad = f"syntax error {path}"
             return
         # Text readers of the source (inspect.getsource, subprocess tools).
         res.tests |= self.opens(path)
-        if ast.dump(old_tree) == ast.dump(new_tree):
+        if _ast_same(old_tree, new_tree):
             res.notes.append(f"{path}: AST unchanged")
             return
-        if swap_equivalent(old_tree, new_tree, path):
+        if _maybe_swap(old, new) and swap_equivalent(old_tree, new_tree, path):
             res.equiv_files = getattr(res, "equiv_files", 0) + 1
             res.notes.append(f"{path}: is/== swap")
         else:
@@ -677,6 +683,24 @@ class _SwapNorm(ast.NodeTransformer):
         return node
 
 
+_MUTATES = False  # set True if anything below ever mutates old_tree in place
+_SWAP_RE = re.compile(r"\bis\b|==|!=")
+
+
+def _maybe_swap(old: str, new: str) -> bool:
+    """Cheap necessary condition for an is/== swap: the changed region has such an operator."""
+    a, b = old.splitlines(), new.splitlines()
+    i = 0
+    while i < min(len(a), len(b)) and a[i] == b[i]:
+        i += 1
+    j = 0
+    while j < min(len(a), len(b)) - i and a[-1 - j] == b[-1 - j]:
+        j += 1
+    ra = "\n".join(a[i:len(a) - j])
+    rb = "\n".join(b[i:len(b) - j])
+    return bool(_SWAP_RE.search(ra)) and bool(_SWAP_RE.search(rb))
+
+
 def swap_equivalent(old_tree, new_tree, path: str) -> bool:
     """True if the trees differ only by is/== swaps against None or enum members.
 
@@ -686,8 +710,60 @@ def swap_equivalent(old_tree, new_tree, path: str) -> bool:
     """
     if path.endswith("executor/env.py"):
         return False
-    import copy
-    return ast.dump(_SwapNorm().visit(copy.deepcopy(old_tree))) == ast.dump(_SwapNorm().visit(copy.deepcopy(new_tree)))
+    try:
+        return _swap_same(old_tree, new_tree)
+    except RecursionError:
+        import copy
+        return ast.dump(_SwapNorm().visit(copy.deepcopy(old_tree))) == ast.dump(_SwapNorm().visit(copy.deepcopy(new_tree)))
+
+
+def _norm_ops(node):
+    operands = [node.left] + node.comparators
+    out = []
+    for i, op in enumerate(node.ops):
+        t = type(op)
+        if any(_is_none(x) or _is_enumish(x) for x in (operands[i], operands[i + 1])):
+            t = {ast.Is: ast.Eq, ast.IsNot: ast.NotEq}.get(t, t)
+        out.append(t)
+    return out
+
+
+def _ast_same(a, b) -> bool:
+    """ast.dump(a) == ast.dump(b), without building the strings."""
+    try:
+        return _same(a, b)
+    except RecursionError:
+        return ast.dump(a) == ast.dump(b)
+
+
+def _same(a, b) -> bool:
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, ast.AST):
+        for f in a._fields:
+            if not _same(getattr(a, f, None), getattr(b, f, None)):
+                return False
+        return True
+    if isinstance(a, list):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    return a == b
+
+
+def _swap_same(a, b) -> bool:
+    """Structural equality of two ASTs (fields only, as ast.dump) with _SwapNorm's op mapping."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, ast.AST):
+        if isinstance(a, ast.Compare):
+            return (_swap_same(a.left, b.left) and _swap_same(a.comparators, b.comparators)
+                    and _norm_ops(a) == _norm_ops(b))
+        for f in a._fields:
+            if not _swap_same(getattr(a, f, None), getattr(b, f, None)):
+                return False
+        return True
+    if isinstance(a, list):
+        return len(a) == len(b) and all(_swap_same(x, y) for x, y in zip(a, b))
+    return a == b
 
 
 class _ScopeIndex:

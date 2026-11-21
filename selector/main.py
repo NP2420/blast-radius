@@ -93,7 +93,14 @@ P_MEDIUM = float(os.environ.get("BR_P_MEDIUM", "0.15"))
 P_BY_SIZE = os.environ.get("BR_P_BY_SIZE", "1") == "1"
 
 
+P_SCALE = float(os.environ.get("BR_P_SCALE", "1.5"))
+
+
 def p_of(kind: str, n: int) -> float:
+    return min(0.97, P_SCALE * _p_of(kind, n))
+
+
+def _p_of(kind: str, n: int) -> float:
     if kind == "file":
         return 0.85 if n <= 3 else 0.3 if n <= 10 else 0.05
     if kind == "strong":

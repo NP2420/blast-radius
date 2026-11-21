@@ -43,7 +43,7 @@ TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "1") == "1"
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
 LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "150"))
-CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.5"))
+CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.0"))
 HOT = os.environ.get("BR_HOT", "1") == "1"
 FP_MAXKEYS = int(os.environ.get("BR_FP_MAXKEYS", "50"))
 PREWARM = os.environ.get("BR_PREWARM", "0") == "1"
@@ -109,6 +109,26 @@ P_SCALE = float(os.environ.get("BR_P_SCALE", "0.6"))
 
 
 P_SCALE_FILE = os.environ.get("BR_P_SCALE_FILE", "1.0")
+
+
+GEN_MEM_SUBSET = os.environ.get("BR_GEN_MEM_SUBSET", "1") == "1"
+_DIALECT_DIRS = ("sqlglot/dialects/", "sqlglot/generators/", "sqlglot/parsers/", "sqlglot/typing/")
+
+
+def _dialect_specific_modules(patched: dict) -> list | None:
+    """Module names when every patched file is one dialect's own module (not a base
+    module or package __init__) or a test/fixture file; else None."""
+    mods = []
+    for p in patched:
+        if p.startswith("tests/"):
+            continue
+        if not p.startswith(_DIALECT_DIRS) or not p.endswith(".py"):
+            return None
+        base = p.rsplit("/", 1)[-1]
+        if base in ("__init__.py", "dialect.py"):
+            return None
+        mods.append(p[:-3].replace("/", "."))
+    return mods or None
 
 
 def p_of(kind: str, n: int) -> float:
@@ -356,6 +376,16 @@ def main() -> None:
         if forced:
             cands -= forced
             res.notes.append(f"{len(forced)} tests listed unverified (empty-registry path)")
+        gm_n = num_by_id.get(runner_mod.GEN_MEM_ID)
+        gm_saved = None
+        if GEN_MEM_SUBSET and gm_n is not None and gm_n in cands:
+            mods = _dialect_specific_modules(res.patched)
+            if mods:
+                allowed[runner_mod.GEN_MEM_ID] = {"mods": mods}
+                gm_saved = LOCAL_MS.get(gm_n, ms[gm_n])
+                LOCAL_MS[gm_n] = 600
+                PROXIED.add(gm_n)
+                res.notes.append(f"generator memory check on dialects of {len(mods)} module(s)")
         cond: list[int] = []
         # Hot-swappable commits that leave the executor and tests alone reuse the
         # parent's TPC tables: TestExecutor's class setup is nearly free there.
@@ -403,10 +433,13 @@ def main() -> None:
             inc, loc = plan(sorted(cands), ms, strong, medium, pmap, groups)
         if forced:
             inc = sorted(set(inc) | forced)
+        if gm_saved is not None:
+            LOCAL_MS[gm_n] = gm_saved
+            PROXIED.discard(gm_n)
         LOCAL_MS.update(saved_local)
         if saved_setup is not None:
             CLASS_SETUP_MS[EXEC_CLS] = saved_setup
-        allowed = {t: sorted(q) for t, q in allowed.items() if num_by_id[t] in set(loc)}
+        allowed = {t: (q if isinstance(q, dict) else sorted(q)) for t, q in allowed.items() if num_by_id[t] in set(loc)}
         decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")

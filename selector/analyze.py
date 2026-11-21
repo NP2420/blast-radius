@@ -184,7 +184,7 @@ class Analyzer:
             # Imported only by name; tests that pass names in (dialect names...) or walk
             # the package see it. Import-time names elsewhere are caught by the
             # importing file's own diff.
-            res.tests |= self.m["proc_tests"]
+            res.tests |= self._proc(path)
             res.notes.append(f"{path}: new module, {bin(listers).count('1')} dir listers")
             return True
         res.broad = f"new file outside package {path}"
@@ -331,7 +331,7 @@ class Analyzer:
                 # Only new, unreferenced module-level functions: nothing can call them.
                 # The fingerprint still guards import-time effects (registries that
                 # scan module globals); lines below shift, so first-line numbers move.
-                res.tests |= self.m["proc_tests"]
+                res.tests |= self._proc(path)
                 res.import_fp = True
                 res.state_guard = True
                 res.key_attrs |= set(added) | {"__firstlineno__"}
@@ -394,7 +394,7 @@ class Analyzer:
                     # by fingerprinting the patched import).
                     res.import_fp = True
                     res.fp_func = True
-                    res.tests |= self.m["proc_tests"]
+                    res.tests |= self._proc(path)
                     res.notes.append(f"{path}:{ln} import-time function code")
             else:
                 self._import_time(path, module, kind, old_idx, ln, res, tree="old")
@@ -416,7 +416,7 @@ class Analyzer:
             return
         if path.startswith("sqlglot/"):
             # Tests that spawn a fresh interpreter (import sqlglot) observe import-time behaviour.
-            res.tests |= self.m["proc_tests"]
+            res.tests |= self._proc(path)
         if k in ("class", "module") and tree == "old":
             # Code inside the statement that runs later (lambda / comprehension
             # bodies in tables): tests that executed it at run time.
@@ -523,7 +523,7 @@ class Analyzer:
                 # A class header (bases, decorators) changes every instance's behaviour;
                 # the fingerprint hashes class dicts, not MROs, so add the class's users.
                 res.tests |= self.recv(f"{module}:{n}")
-            res.tests |= self.m["proc_tests"]
+            res.tests |= self._proc(path)
             res.tests |= self.collect_file(path) if path.startswith("tests/") else 0
             # Names copied into widely shared class tables reach far: keep the
             # file-level set instead when it is cheaper (both are validated covers).
@@ -634,6 +634,16 @@ class Analyzer:
         res.strong |= tests
         res.notes.append(f"{path}: {len(swaps)} operator swap(s), profile -> {bin(tests).count('1')} tests")
         return True
+
+    def _proc(self, path: str) -> int:
+        """Tests that start a fresh interpreter and run `import sqlglot` (test_lazy_load):
+        only modules that bare import loads can change what they see."""
+        if not CORE_ONLY_PROC or not path.startswith("sqlglot/"):
+            return self.m["proc_tests"]
+        mod = path[:-3].replace("/", ".")
+        if mod.endswith(".__init__"):
+            mod = mod[: -len(".__init__")]
+        return self.m["proc_tests"] if mod in _CORE_MODULES else 0
 
     def _read_lines(self, path: str, names) -> list:
         """Lines of the pristine file that load any of names (bare names or attribute roots)."""
@@ -1001,6 +1011,18 @@ def _locals_renamed_only(old: ast.Module, new: ast.Module) -> bool:
     except RecursionError:
         return False
 
+
+def _load_core() -> set:
+    import json
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "core_modules.json")) as f:
+            return set(json.load(f))
+    except (OSError, ValueError):
+        return set()
+
+
+_CORE_MODULES = _load_core()  # modules a bare `import sqlglot` loads at the pinned commit
+CORE_ONLY_PROC = os.environ.get("BR_CORE_ONLY_PROC", "1") == "1" and bool(_CORE_MODULES)
 
 _RICH = ("Eq", "NotEq", "Lt", "LtE", "Gt", "GtE")
 _CMP_FAMILY = {

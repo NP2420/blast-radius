@@ -187,7 +187,7 @@ class _Result(unittest.TestResult):
         if sp is not None:
             tid = getattr(test, "_bt_id", None)
             a = getattr(self, "allowed", {}).get(tid)
-            sp.ALLOWED[0] = set(a) if a is not None else None
+            sp.ALLOWED[0] = set(a) if isinstance(a, (list, set, tuple)) else None
             # TPC executor tests read pool results in submission order: compute each
             # query only when asked, so a test stopped at its first failure skips the rest.
             sp.LAZY[0] = EARLY_STOP and tid in _LAZY_TESTS
@@ -305,6 +305,39 @@ def _max_nodes_proxy() -> bool:
     return (t1.ru_utime + t1.ru_stime) - (t0.ru_utime + t0.ru_stime) <= PROXY_LIMIT_S
 
 
+GEN_MEM_ID = "tests/test_generator.py::TestGenerator::test_generator_memory"
+
+
+def _gen_mem_dialects(mods: list) -> list:
+    """Dialects whose dialect/generator/parser/tokenizer classes come from, or whose
+    modules import, one of the patched dialect-specific modules."""
+    import sys as _sys
+    from sqlglot.dialects import Dialect, Dialects
+    out = []
+    for name in Dialects:
+        try:
+            d = Dialect.get_or_raise(name)
+            classes = [type(d), d.generator_class, d.parser_class, d.tokenizer_class]
+            owners = {c.__module__ for k in classes for c in k.__mro__}
+        except Exception:  # noqa: BLE001
+            out.append(name)
+            continue
+        hit = bool(owners & set(mods))
+        if not hit:
+            for o in owners:
+                f = getattr(_sys.modules.get(o), "__file__", None)
+                try:
+                    src = open(f, encoding="utf-8").read() if f else ""
+                except OSError:
+                    src = ""
+                if any(m in src for m in mods):
+                    hit = True
+                    break
+        if hit:
+            out.append(name)
+    return out
+
+
 def _run_tests(wfd: int, test_ids: list, allowed: dict | None, prewarmed: bool = False) -> None:
     """Run unittest methods in this (already prepared) process, streaming results."""
     if PROXY and MAX_NODES_ID in test_ids:
@@ -329,6 +362,10 @@ def _run_tests(wfd: int, test_ids: list, allowed: dict | None, prewarmed: bool =
                 mod = importlib.import_module(modname)
                 if prewarmed and f"{file}::{cls}" == _EXEC_CLS:
                     _use_prewarmed_executor(mod)
+                gm = (allowed or {}).get(GEN_MEM_ID)
+                if isinstance(gm, dict) and modname == "tests.test_generator":
+                    # Only the dialects the patch can reach run the leak check.
+                    mod.Dialects = _gen_mem_dialects(gm["mods"])
                 klass = getattr(mod, cls)
                 cases = []
                 for tid, meth in items:

@@ -17,7 +17,7 @@ INERT_PREFIXES = ("benchmarks/", "posts/", "pdoc/", "docs/", ".github/", "sqlglo
 INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
-MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "0") == "1"
+MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
 
 
 @dataclass
@@ -375,20 +375,50 @@ class Analyzer:
                 res.tests |= self.recv(f"{module}:{n}")
             res.tests |= self.m["proc_tests"]
             res.tests |= self.collect_file(path) if path.startswith("tests/") else 0
-            res.notes.append(f"{path}:{ln} module level (names {sorted(names)[:4]})")
+            # Names copied into widely shared class tables reach far: keep the
+            # file-level set instead when it is cheaper (both are validated covers).
+            narrow = res.tests
+            res.tests = 0
+            self._module_file_set(path, module, idx, ln, res)
+            wide = res.tests
+            node = idx.stmt_at(ln)
+            plain = isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+            if plain and self._weight(wide) < self._weight(narrow):
+                res.tests = wide
+                res.notes.append(f"{path}:{ln} module level (file set)")
+            else:
+                res.tests = narrow
+                res.notes.append(f"{path}:{ln} module level (names {sorted(names)[:4]})")
             return
         if k == "module":
-            res.tests |= self.cov_file(path)
-            res.tests |= self.collect_file(path)
-            res.tests |= self.recv_module(module)
-            if path.startswith("tests/"):
-                res.tests |= self.m["file_tests"].get(path, 0)
-                res.tests |= self.m["test_importers"].get(module, 0)
-            names = idx.names_assigned(ln)
-            res.tests |= self._name_users(names)
+            self._module_file_set(path, module, idx, ln, res)
             res.notes.append(f"{path}:{ln} module level")
             return
         res.broad = f"unresolved scope {path}:{ln}"
+
+    def _module_file_set(self, path, module, idx, ln, res: Result) -> None:
+        res.tests |= self.cov_file(path)
+        res.tests |= self.collect_file(path)
+        res.tests |= self.recv_module(module)
+        if path.startswith("tests/"):
+            res.tests |= self.m["file_tests"].get(path, 0)
+            res.tests |= self.m["test_importers"].get(module, 0)
+        names = idx.names_assigned(ln)
+        res.tests |= self._name_users(names)
+
+    def _weight(self, bits: int) -> float:
+        """Total local run time (ms) of a test bitset."""
+        w = getattr(self, "_w", None)
+        if w is None:
+            lm = self.m.get("local_ms", {})
+            w = self._w = [float(lm.get(t, 100)) for t in self.m["tests"]]
+        total, i = 0.0, 0
+        while bits:
+            if bits & 1:
+                total += w[i]
+            bits >>= 1
+            i += 1
+        return total
 
     def state_key_users(self, key: str) -> int | None:
         """Tests that can observe a changed import-time state entry; None = unknown."""

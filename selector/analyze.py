@@ -19,8 +19,9 @@ INERT_PREFIXES = ("benchmarks/", "posts/", "pdoc/", "docs/", ".github/", "sqlglo
 INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
-MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "0") == "1"
+MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
 IMPORT_LOCAL = os.environ.get("BR_IMPORT_LOCAL", "1") == "1"
+CLASS_HEADER_NAME = os.environ.get("BR_CLASS_HEADER_NAME", "1") == "1"
 
 
 @dataclass
@@ -370,7 +371,14 @@ class Analyzer:
             # Module-level statement in sqlglot: runtime readers of the edited names
             # (line level), test files importing those names, the fresh-interpreter
             # test; the fingerprint ripple guard covers import-time effects.
-            names = self._alias_closure(idx.names_assigned(ln))
+            node_ = idx.stmt_at(ln)
+            if isinstance(node_, ast.ClassDef) and CLASS_HEADER_NAME:
+                # Header line of a class (bases, keywords, decorators): the class
+                # object itself changes; its body tables are fingerprinted.
+                names = {node_.name}
+                res.tests |= self._class_ref_users(node_.name)
+            else:
+                names = self._alias_closure(idx.names_assigned(ln))
             nl = self.m.get("name_line_users", {})
             is_import = isinstance(idx.stmt_at(ln), (ast.Import, ast.ImportFrom))
             if is_import and IMPORT_LOCAL:
@@ -423,6 +431,43 @@ class Analyzer:
             res.tests |= self.m["test_importers"].get(module, 0)
         names = idx.names_assigned(ln)
         res.tests |= self._name_users(names)
+
+    def _class_ref_users(self, name: str) -> int:
+        """Receivers of sqlglot classes whose body names `name` at import (e.g. `Parser = X`)."""
+        import glob
+        bits = 0
+        pat = re.compile(r"\b" + re.escape(name) + r"\b")
+        for f in glob.glob(os.path.join(self.repo, "sqlglot", "**", "*.py"), recursive=True):
+            try:
+                src = open(f, encoding="utf-8").read()
+            except OSError:
+                continue
+            if not pat.search(src):
+                continue
+            try:
+                tree = ast.parse(src)
+            except SyntaxError:
+                continue
+            rel = os.path.relpath(f, self.repo)
+            mod = rel[:-3].replace("/", ".")
+            if mod.endswith(".__init__"):
+                mod = mod[: -len(".__init__")]
+
+            def walk(body, qual):
+                nonlocal bits
+                for node in body:
+                    if isinstance(node, ast.ClassDef):
+                        q = f"{qual}.{node.name}" if qual else node.name
+                        refs = any(isinstance(n, ast.Name) and n.id == name
+                                   for st in node.body if not isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                   for n in ast.walk(st))
+                        refs = refs or any(isinstance(n, ast.Name) and n.id == name
+                                           for b in node.bases + node.keywords + node.decorator_list for n in ast.walk(b))
+                        if refs:
+                            bits |= self.recv(f"{mod}:{q}")
+                        walk(node.body, q)
+            walk(tree.body, "")
+        return bits
 
     def _read_lines(self, path: str, names) -> list:
         """Lines of the pristine file that load any of names (bare names or attribute roots)."""

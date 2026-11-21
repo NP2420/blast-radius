@@ -11,3 +11,4 @@
 | 7 | `329c01f6` | Sat 2:27 AM | 199.2 | 171.1 | 28.1 | 0 | v11: module-level narrowing, loose fingerprint; simulated +14.8 vs v10, under investigation |
 | 8 | `17313af7` | Sat 3:27 AM | 186.2 | 171.0 | 15.2 | 0 | v12c: fingerprint + tests in one process, failure odds by evidence size, cheaper module table sets. CPU halved; simulated regression from v11 remains |
 | 9 | `35653616` | Sat 4:28 AM | 191.7 | 183.7 | 8.0 | 0 | v12e: failure odds x1.5, import edits in-file readers, faster analysis. CPU -7 but simulated +12.7: on the board, local runs pay off more than on our labels |
+| 10 | `6558c4d0` | Sat 5:30 AM | 191.5 | 171.0 | 20.5 | 0 | v12f (A/B): odds x1.0, module narrowing for class headers only. Simulated identical to v12c, so module narrowing is not the regression |

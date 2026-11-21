@@ -524,3 +524,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+    # Skip interpreter teardown (freeing the maps and every module costs CPU and
+    # changes nothing): flush and exit.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

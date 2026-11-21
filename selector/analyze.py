@@ -17,7 +17,7 @@ INERT_PREFIXES = ("benchmarks/", "posts/", "pdoc/", "docs/", ".github/", "sqlglo
 INERT_SUFFIXES = (".md", ".png", ".svg", ".rst", ".txt")
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
-MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
+MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "0") == "1"
 
 
 @dataclass

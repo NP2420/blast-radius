@@ -84,7 +84,8 @@ def pack_cost(nums, ms) -> int:
 
 
 CLASS_SETUP_MS = {"tests/test_executor.py::TestExecutor": 1200}  # replaced from maps when present
-LOCAL_MS: dict[int, int] = {}  # measured local CPU per test number (falls back to recorded)
+LOCAL_MS: dict[int, int] = {}
+PROXIED: set = set()  # heavy tests verified locally by a cheap proxy  # measured local CPU per test number (falls back to recorded)
 _class_of: dict[int, str] = {}
 
 
@@ -164,8 +165,11 @@ def plan(cands: list[int], ms: dict[int, int], strong: set | None = None, medium
         p = {n: pmap.get(n, P_WEAK) for n in cands}
     else:
         p = {n: (P_STRONG if n in strong else P_MEDIUM if n in medium else P_WEAK) for n in cands}
-    st = sorted((n for n in cands if n in strong), key=lambda n: -ms[n])
-    wk = sorted((n for n in cands if n not in strong), key=lambda n: -ms[n])
+    # Heaviest first; a heavy test with a cheap proxy check goes last (verify it).
+    def order(n):
+        return 0 if n in PROXIED else -ms[n]
+    st = sorted((n for n in cands if n in strong), key=order)
+    wk = sorted((n for n in cands if n not in strong), key=order)
 
     def expected(inc, loc):
         c = pack_cost(inc, ms) + local_cost(loc, ms)
@@ -262,6 +266,9 @@ def main() -> None:
                 LOCAL_MS[num_by_id[tid]] = v
         CLASS_SETUP_MS.clear()
         CLASS_SETUP_MS.update(maps["class_setup"])
+    if runner_mod.PROXY and runner_mod.MAX_NODES_ID in num_by_id:
+        LOCAL_MS[num_by_id[runner_mod.MAX_NODES_ID]] = 400  # checked by a scaled proxy
+        PROXIED.add(num_by_id[runner_mod.MAX_NODES_ID])
     mapped = set(map_ids)
     unmapped = [num_by_id[i] for i in num_by_id if i not in mapped]
     if unmapped:

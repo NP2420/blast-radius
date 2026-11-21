@@ -263,8 +263,54 @@ def _child(repo: str, farm: str, patched: dict, test_ids: list[str], wfd: int, a
         os._exit(0)
 
 
+MAX_NODES_ID = "tests/test_parser.py::TestParser::test_max_nodes"
+PROXY = os.environ.get("BR_PROXY", "1") == "1"
+PROXY_LIMIT_S = float(os.environ.get("BR_PROXY_LIMIT_S", "2.5"))
+
+
+def _max_nodes_proxy() -> bool:
+    """test_max_nodes at reduced width: the same assertions on the node limit, its
+    error message and recovery, with limits scaled to the smaller statement (the
+    real test parses ~2M nodes in ~25 s). A run much slower than usual counts as a
+    failure, since the real test would time out. True = pass."""
+    import resource
+    t0 = resource.getrusage(resource.RUSAGE_SELF)
+    try:
+        from sqlglot import exp, parse_one
+        from sqlglot.errors import ParseError
+        if not isinstance(parse_one("SELECT 1", max_nodes=1_000_000), exp.Select):
+            return False
+        cols = [f"col{i}" for i in range(500)]
+        if not isinstance(parse_one(f"SELECT {','.join(cols)} FROM t", max_nodes=1_000_000), exp.Select):
+            return False
+        expr = "x" + "=x" * 100
+        sql = "SELECT " + ",".join([expr] * 200)  # ~40k nodes
+        for limit, needle in ((20_000, "Maximum number of AST nodes"), (5_000, "(5000)")):
+            try:
+                parse_one(sql, max_nodes=limit)
+                return False
+            except ParseError as e:
+                if needle not in str(e):
+                    return False
+        try:
+            parse_one("SELECT " + ",".join(f"x={i}" for i in range(100)), max_nodes=5)
+            return False
+        except ParseError:
+            pass
+        if not isinstance(parse_one("SELECT 1, 2, 3"), exp.Select):
+            return False
+    except BaseException:  # noqa: BLE001
+        return False
+    t1 = resource.getrusage(resource.RUSAGE_SELF)
+    return (t1.ru_utime + t1.ru_stime) - (t0.ru_utime + t0.ru_stime) <= PROXY_LIMIT_S
+
+
 def _run_tests(wfd: int, test_ids: list, allowed: dict | None, prewarmed: bool = False) -> None:
     """Run unittest methods in this (already prepared) process, streaming results."""
+    if PROXY and MAX_NODES_ID in test_ids:
+        ok = _max_nodes_proxy()
+        os.write(wfd, (json.dumps({"id": MAX_NODES_ID, "failed": not ok}) + "\n").encode())
+        test_ids = [t for t in test_ids if t != MAX_NODES_ID]
     if True:
         import syncpool
         syncpool.install()

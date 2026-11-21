@@ -32,7 +32,7 @@ FP_BASE = os.environ.get("BR_FP_BASE", str(Path(MAPS).parent / "fp_base.pkl"))
 FP_NARROW = os.environ.get("BR_FP_NARROW", "0") == "1"
 EQUIV = os.environ.get("BR_EQUIV", "1") == "1"
 # Heavy tests (>= HEAVY_MS) are listed only with strong evidence (diagnostic / policy).
-DROP_WEAK_HEAVY = os.environ.get("BR_DROP_WEAK_HEAVY", "0") == "1"
+DROP_WEAK_HEAVY = os.environ.get("BR_DROP_WEAK_HEAVY", "1") == "1"
 HEAVY_MS = int(os.environ.get("BR_HEAVY_MS", "1000"))
 EQUIV_PROBE_MS = int(os.environ.get("BR_EQUIV_PROBE_MS", "500"))
 # Per-query runs of heavy executor tests (tpcds); off by default.
@@ -40,7 +40,7 @@ TASK_PARTIAL = os.environ.get("BR_TASK_PARTIAL", "0") == "1"
 TMP = os.environ.get("BR_TMP", "/tmp")
 WORKER_MS = 2000
 LOCAL_OVERHEAD_MS = int(os.environ.get("BR_LOCAL_OVERHEAD_MS", "300"))
-CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.0"))
+CPU_FACTOR = float(os.environ.get("BR_CPU_FACTOR", "1.5"))
 LOCAL_BUDGET_S = float(os.environ.get("BR_LOCAL_BUDGET_S", "110"))
 NO_LOCAL = os.environ.get("BR_NO_LOCAL") == "1"
 T0 = time.monotonic()

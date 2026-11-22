@@ -50,3 +50,4 @@
 | 46 | `ebeeee9b` | Sun 4:47 AM | 151.3 | 120.3 | 30.9 | 0 | v31: executor check limited to queries that run a changed function. Same as v30 within CPU noise (narrowing does not apply to the board's commit) |
 
 **Final entry picked (Sun 4:48 AM): v30 `658be56d` (BB-2DDF7848, 149.9, 0 misses)** - replaces the auto-entered diagnostic scores, whose rules drop tests and are not safe.
+| 47 | `01d5fd33` (branch diag-cat-weak) | Sun 6:06 AM | 141.4 | 110.7 | 30.6 | 0 | Diagnostic (UNSAFE): unverified weak candidates dropped: -9.6 s on the board, but on our labeled sets the same rule misses 55 commits (weak candidates do fail). Not adopted |

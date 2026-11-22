@@ -424,7 +424,7 @@ def main() -> None:
         """Decide include/local/cond for one commit; returns (local test ids, allowed)."""
         res = analyses[cid]
         if res.broad:
-            decisions[cid] = {"include": all_nums, "local": [], "broad": res.broad, "cond": []}
+            decisions[cid] = {"include": all_nums, "local": [], "broad": res.broad, "cond": [], "tpc": "broad"}
             log(f"{cid}: BROAD ({res.broad})")
             return [], {}
         cands = set(unmapped) | bits_to_nums(res.tests, map_ids, num_by_id)
@@ -477,6 +477,14 @@ def main() -> None:
             LOCAL_MS[n_] = int(300 + saved_local[n_] * len(qs) / max(1, maps["task_cov"][tid]["n"]))
             res.notes.append(f"{tid.split('::')[-1]}: {len(qs)} queries")
         tpc_saved = None
+        _why = None
+        if tpc_n is not None and tpc_n in cands:
+            if any(p.startswith("sqlglot/executor/") for p in res.patched):
+                _why = "executor"
+            elif not tpc_proxy_ok(res) and any(not p.startswith("sqlglot/") for p in res.patched):
+                _why = "outside"
+            elif not tpc_proxy_ok(res):
+                _why = "dataphase"
         if tpc_n is not None and tpc_n in cands and (TPC_STRONG or tpc_n not in strong) and tpc_proxy_ok(res):
             qs = allowed.get(runner_mod.TPC_ID)
             idx = sorted(q for q in qs if q in runner_mod.TPC_BASE) if qs is not None else None
@@ -562,7 +570,17 @@ def main() -> None:
         if saved_setup is not None:
             CLASS_SETUP_MS[EXEC_CLS] = saved_setup
         allowed = {t: (q if isinstance(q, dict) else sorted(q)) for t, q in allowed.items() if num_by_id[t] in set(loc)}
-        decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}
+        _r = None
+        if tpc_n is not None:
+            if tpc_n in forced:
+                _r = "forced"
+            elif tpc_n in cond:
+                _r = "cond"
+            elif tpc_n in inc:
+                _r = "planner" if tpc_saved is not None else (_why or "noproxy")
+            elif tpc_n in loc:
+                _r = "local" if tpc_saved is not None else "localreal"
+        decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond, "tpc": _r}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")
         return [id_by_num[x] for x in loc], allowed
@@ -726,8 +744,11 @@ def main() -> None:
         if probe_failed and d.get("cond"):
             chosen.update(d["cond"])
             log(f"{cid}: equiv probe failed; listing {len(d['cond'])} conditional tests")
+        _dr = set(os.environ.get("BR_DIAG_TPC", "").split(","))
+        if tpc_n is not None and d.get("tpc") in _dr:
+            chosen.discard(tpc_n)
         cost, workers = pack(sorted(chosen), ms)
-        if FILL_SLACK and workers and not d.get("broad"):
+        if FILL_SLACK and workers and not d.get("broad") and not (_dr - {""}):
             workers = fill_slack(workers, insurance(cid, chosen, d, r))
         total += cost
         sys.stdout.write(json.dumps({"commit": cid, "workers": workers}) + "\n")

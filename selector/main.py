@@ -88,7 +88,8 @@ TPC_PROXY = os.environ.get("BR_TPC_PROXY", "1") == "1"
 BROKEN_FP = os.environ.get("BR_BROKEN_FP", "1") == "1"
 # Lines the TPC-DS test executes changed: it fails about half the time there, so a
 # trace that usually ends in listing it anyway is not worth its CPU.
-TPC_STRONG = os.environ.get("BR_TPC_STRONG", "0") == "1"
+TPC_STRONG = os.environ.get("BR_TPC_STRONG", "1") == "1"
+TPC_P_CAP = float(os.environ.get("BR_TPC_P_CAP", "0.5"))  # observed: strong TPC-DS fails about half the time
 TPC_TRACE_BASE_MS = int(os.environ.get("BR_TPC_TRACE_BASE_MS", "400"))
 TPC_TRACE_Q_MS = int(os.environ.get("BR_TPC_TRACE_Q_MS", "62"))  # replaced from maps when present
 LOCAL_MS: dict[int, int] = {}
@@ -534,6 +535,8 @@ def main() -> None:
                         groups.append((set(S), a_of(kind, len(S))))
             else:
                 groups = None
+            if pmap is not None and tpc_saved is not None and tpc_n in pmap:
+                pmap[tpc_n] = min(pmap[tpc_n], TPC_P_CAP)
             inc, loc = plan(sorted(cands), ms, strong, medium, pmap, groups)
         if forced:
             inc = sorted(set(inc) | forced)

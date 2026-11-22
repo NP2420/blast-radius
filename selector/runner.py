@@ -311,15 +311,23 @@ TPC_BASE: dict = {}   # query index -> pristine trace digest (set by the parent)
 TPC_REPO = ""
 
 
-def _tpc_proxy(indices) -> bool:
-    """TPC-DS queries' data-free traces equal the pristine ones (see tpctrace). True = pass."""
+def _tpc_proxy(indices):
+    """TPC-DS queries' data-free traces vs the pristine ones (see tpctrace).
+    Returns (True, set()) when all match (pass); (False, Q) when only queries Q differ
+    and every query still parses (run those for real); (False, None) otherwise."""
     try:
         import tpctrace
         got = tpctrace.digests(os.getcwd(), TPC_ID, None if indices is None else set(indices))
         want = TPC_BASE if indices is None else {i: TPC_BASE[i] for i in list(indices) + [-1] if i in TPC_BASE}
-        return -1 in want and got == want
+        if -1 not in want or got.get(-1) != want[-1]:
+            return False, None
+        bad = {i for i in want if i != -1 and got.get(i) != want[i]}
+        return (not bad), bad
     except BaseException:  # noqa: BLE001
-        return False
+        return False, None
+
+
+TPC_REAL_MAX = int(os.environ.get("BR_TPC_REAL_MAX", "5"))
 
 
 def _gen_mem_dialects(mods: list) -> list:
@@ -360,9 +368,14 @@ def _run_tests(wfd: int, test_ids: list, allowed: dict | None, prewarmed: bool =
         test_ids = [t for t in test_ids if t != MAX_NODES_ID]
     tp = (allowed or {}).get(TPC_ID)
     if TPC_ID in test_ids and isinstance(tp, dict) and "trace" in tp:
-        ok = _tpc_proxy(tp["trace"])
-        os.write(wfd, (json.dumps({"id": TPC_ID, "failed": not ok}) + "\n").encode())
-        test_ids = [t for t in test_ids if t != TPC_ID]
+        ok, bad = _tpc_proxy(tp["trace"])
+        if not ok and bad and len(bad) <= TPC_REAL_MAX:
+            # Traces differ only for some queries: run the real test on just those.
+            allowed = dict(allowed)
+            allowed[TPC_ID] = sorted(bad)
+        else:
+            os.write(wfd, (json.dumps({"id": TPC_ID, "failed": not ok}) + "\n").encode())
+            test_ids = [t for t in test_ids if t != TPC_ID]
     if True:
         import syncpool
         syncpool.install()

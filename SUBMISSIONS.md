@@ -30,4 +30,5 @@
 | 26 | `a8ea9ddf` | Sat 7:07 PM | 162.5 | 138.4 | 24.1 | 0 | v19: owner-level table keys (edit reaches its class, subclasses and copies only). CPU -2.2. Best so far |
 | 27 | `6e0a2751` | Sat 8:04 PM | 166.1 | 138.4 | 27.6 | 0 | v20: TPC-DS checked by data-free execution traces instead of a 23 s listing; memoizing-decorator patches listed unverified. Board simulated unchanged (no passing-TPC commit there), CPU +3.6 |
 | 28 | `c41bfe8b` | Sat 9:18 PM | 160.9 | 138.4 | 22.5 | 0 | v21: syntax-error patches list only tests that load the broken module (module-need map), not every test. Best so far (board has no syntax-error commit; CPU lower) |
-| 29 | `aca028d3` | Sat 10:25 PM | pending | | | | v22: modules failing at import or deleted list only their loaders; conftest/pytest.ini/pytest settings edits run everything; TPC trace only without line evidence |
+| 29 | `aca028d3` | Sat 10:24 PM | 164.5 | 138.4 | 26.1 | 0 | v22: modules failing at import or deleted list only their loaders; conftest/pytest.ini/pytest settings edits run everything; TPC trace only without line evidence. Board CPU varies ±3 s between identical-path versions |
+| 30 | `aea778c3` | Sat 11:05 PM | pending | | | | v23: test package __init__ edits list every test under it; new or changed test-module import-time code (monkeypatching) runs everything |

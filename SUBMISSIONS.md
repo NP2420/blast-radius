@@ -35,4 +35,5 @@
 | 31 | `c41bfe8b` | Sat 10:39 PM | 164.1 | 138.4 | 25.6 | 0 | v21 resubmitted unchanged: measures board CPU noise between runs: +3.1 s CPU vs its first run, same simulated |
 | 32 | `dab69d31` (branch diag-nolocal) | Sun 1:01 AM | 188.3 | 183.3 | 5.1 | 0 | Diagnostic: no local runs. Local verification saves 45 s simulated for ~19 s CPU on the board |
 | 33 | `b591520a` | Sun 1:25 AM | rejected | | | | Mistyped commit hash (not in repo); no effect on scores |
-| 34 | `6c004fff` | Sun 1:27 AM | pending | | | | v24: TPC-DS/TPC-H fixture edits charged per query; expected-output-only edits skip the executor tests (25.5 s -> 4.2 s) |
+| 34 | `6c004fff` | Sun 1:26 AM | 441.6 | 417.2 | 24.4 | 1 | v24: TPC-DS/TPC-H fixture edits charged per query; expected-output-only edits skip the executor tests (25.5 s -> 4.2 s). Board has a TPC fixture commit: -21.2 s simulated, but 1 miss (test parses every query; a broken non-executed query fails it) |
+| 35 | `dccc347c` | Sun 1:47 AM | pending | | | | v25: fix - any TPC fixture SQL change keeps the execute test, verified locally (parse all + run changed queries) |

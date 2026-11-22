@@ -30,6 +30,10 @@ ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
 OWNER_KEYS = os.environ.get("BR_OWNER_KEYS", "1") == "1"
 BROKEN_NARROW = os.environ.get("BR_BROKEN_NARROW", "1") == "1"
+TPC_FIXTURE = os.environ.get("BR_TPC_FIXTURE", "1") == "1"
+TPC_FIXTURES = {"tests/fixtures/optimizer/tpc-ds/tpc-ds.sql": "tpcds", "tests/fixtures/optimizer/tpc-h/tpc-h.sql": "tpch"}
+TPC_TEST = {"tpcds": "tests/test_executor.py::TestExecutor::test_execute_tpcds",
+            "tpch": "tests/test_executor.py::TestExecutor::test_execute_tpch"}
 MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
 IMPORT_LOCAL = os.environ.get("BR_IMPORT_LOCAL", "1") == "1"
 CLASS_HEADER_NAME = os.environ.get("BR_CLASS_HEADER_NAME", "1") == "1"
@@ -59,6 +63,7 @@ class Result:
     state_guard: bool = False                      # class/module edit: fingerprint ripple check required
     state_guard_pending: bool = False
     broad: str | None = None                       # reason, if we must run everything
+    tpc_queries: dict = field(default_factory=dict)  # TPC test id -> query indices a fixture edit changed
     broken: bool = False                           # a patched module cannot be imported: list res.tests as is
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
@@ -156,6 +161,8 @@ class Analyzer:
             res.patched[path] = new
             if path.endswith(".py"):
                 self._python(path, old, new, fd, res)
+            elif TPC_FIXTURE and path in TPC_FIXTURES and self._tpc_fixture(path, old, new, res):
+                pass
             else:
                 self._data_file(path, res)
             if res.broad:
@@ -410,6 +417,85 @@ class Analyzer:
         return False
 
     # ---- non-python files ------------------------------------------------
+    def _tpc_fixture(self, path: str, old: str, new: str, res: Result) -> bool:
+        """TestExecutor reads both TPC fixture files in setUpClass, so every test of
+        the class "reads" them, but only the TPC tests use the queries. Split the file
+        the way tests/helpers.py does and charge per query. False: fall back."""
+        if "tests/helpers.py" in res.patched:
+            return False
+        try:
+            # The loader's own two helpers, without importing tests.helpers here (the
+            # warm parent must not hold a test module a child may need patched).
+            with open(os.path.join(self.repo, "tests/helpers.py"), encoding="utf-8") as f:
+                tree = ast.parse(f.read())
+            ns: dict = {}
+            fns = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("_extract_meta", "_filter_comments")]
+            exec(compile(ast.Module(body=fns, type_ignores=[]), "tests/helpers.py", "exec"), ns)
+            _extract_meta, _filter_comments = ns["_extract_meta"], ns["_filter_comments"]
+        except Exception:  # noqa: BLE001
+            return False
+
+        def pairs(text):
+            st = _filter_comments(text).split(";")
+            out = []
+            for i in range(0, len(st), 2):
+                if i + 1 < len(st):
+                    sql, meta = _extract_meta(st[i].strip())
+                    out.append((meta, sql, st[i + 1].strip()))
+            return out
+
+        try:
+            po, pn = pairs(old), pairs(new)
+        except Exception:  # noqa: BLE001
+            return False  # setUpClass itself may now fail: every reader
+        kind = TPC_FIXTURES[path]
+        readers = self.opens(path)
+        ids = self.m["tests"]
+        idx = {t: i for i, t in enumerate(ids)}
+        n = max(len(po), len(pn))
+        sqlchg, anychg = set(), set()
+        for i in range(n):
+            a = po[i] if i < len(po) else None
+            b = pn[i] if i < len(pn) else None
+            if a != b:
+                anychg.add(i)
+            if a is None or b is None or a[:2] != b[:2]:
+                sqlchg.add(i)
+        if not anychg:
+            res.notes.append(f"{path}: no query changed")
+            return True
+        executed = {i for i in sqlchg if (i < len(po) and po[i][0].get("execute")) or
+                    (i < len(pn) and pn[i][0].get("execute"))}
+        keep = 0
+        for t in ids:
+            b = 1 << idx[t]
+            if not readers & b:
+                continue
+            if not t.startswith("tests/test_executor.py::TestExecutor::"):
+                keep |= b  # optimizer fixture tests etc.: per-pair work, keep
+                continue
+            name = t.rsplit("::", 1)[1]
+            if kind == "tpcds" and name == "test_execute_tpcds" and executed:
+                keep |= b
+            elif kind == "tpch" and name == "test_execute_tpch" and executed:
+                keep |= b
+            elif kind == "tpch" and name == "test_optimized_tpch":
+                keep |= b
+        res.tests |= keep
+        res.strong |= keep
+        res.file_readers |= keep & ~self._tpc_exec_bits(kind)
+        if executed:
+            res.tpc_queries[TPC_TEST[kind]] = executed
+        res.notes.append(f"{path}: queries {sorted(anychg)[:5]} changed ({len(executed)} executed): "
+                         f"{bin(keep).count('1')} tests")
+        return True
+
+    def _tpc_exec_bits(self, kind: str) -> int:
+        try:
+            return 1 << self.m["tests"].index(TPC_TEST[kind])
+        except ValueError:
+            return 0
+
     def _data_file(self, path: str, res: Result) -> None:
         if path in self.m["parent_opens"]:
             res.broad = f"read at import/collection: {path}"
@@ -974,6 +1060,11 @@ class Analyzer:
         None: the test must run whole (change reaches code outside per-query work,
         or the evidence is not line-level).
         """
+        if tid in res.tpc_queries and len(res.patched) == 1:
+            q = 0
+            for i in res.tpc_queries[tid]:
+                q |= 1 << i
+            return q
         tc = self.m.get("task_cov", {}).get(tid)
         if tc is None or not (is_strong or is_medium) or res.import_fp:
             return None

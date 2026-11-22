@@ -157,7 +157,27 @@ class Analyzer:
             if not path.endswith(".py") and path not in ():
                 res.nonequiv_files = getattr(res, "nonequiv_files", 0) + 1
         res.equiv = getattr(res, "equiv_files", 0) > 0 and getattr(res, "nonequiv_files", 0) == 0
+        self._cache_decorators(res)
         return res
+
+    _CACHE_DEC = re.compile(r"@\s*[\w.]*\b(?:lru_cache|cache|cached_property)\b")
+
+    def _cache_decorators(self, res: Result) -> None:
+        """A memoizing decorator added or removed: results then depend on what ran
+        earlier in the process, so a local run of a subset can pass where the full
+        suite fails. List every candidate without trusting local verdicts."""
+        for path, new in res.patched.items():
+            if not path.endswith(".py") or new is None:
+                continue
+            try:
+                with open(os.path.join(self.repo, path), encoding="utf-8") as f:
+                    old = f.read()
+            except OSError:
+                continue
+            if self._CACHE_DEC.findall(old) != self._CACHE_DEC.findall(new):
+                res.unverified = self.all_bits
+                res.notes.append(f"{path}: memoizing decorator changed; local verdicts untrusted")
+                return
 
     def _new_file(self, fd: FileDiff, res: Result) -> bool:
         """A file that did not exist: only code that lists its directory, or that a

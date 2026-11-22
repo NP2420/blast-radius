@@ -8,7 +8,7 @@ import analyze, patchparse
 pdir, labels = sys.argv[1], json.load(open(sys.argv[2]))["commits"]
 tests = json.load(open(sys.argv[3] if len(sys.argv) > 3 else "/home/claude/kits/br/sample/tests.json"))["tests"]
 ms = {t["id"]: t["seconds"] for t in tests}; num = {t["number"]: t["id"] for t in tests}
-m = pickle.load(open("/home/claude/dev/br/maps/maps.pkl", "rb")); ids = m["tests"]
+m = pickle.load(open(os.environ.get("MAPS", "/home/claude/dev/br/maps/maps.pkl"), "rb")); ids = m["tests"]
 an = analyze.Analyzer(m, "/home/claude/dev/sqlglot")
 kinds = {}
 kp = os.path.join(pdir, "kinds.json")

@@ -83,7 +83,10 @@ def pack_cost(nums, ms) -> int:
     return pack(list(nums), ms)[0]
 
 
-CLASS_SETUP_MS = {"tests/test_executor.py::TestExecutor": 1200}  # replaced from maps when present
+CLASS_SETUP_MS = {"tests/test_executor.py::TestExecutor": 1200}
+TPC_PROXY = os.environ.get("BR_TPC_PROXY", "1") == "1"
+TPC_TRACE_BASE_MS = int(os.environ.get("BR_TPC_TRACE_BASE_MS", "400"))
+TPC_TRACE_Q_MS = int(os.environ.get("BR_TPC_TRACE_Q_MS", "62"))  # replaced from maps when present
 LOCAL_MS: dict[int, int] = {}
 PROXIED: set = set()  # heavy tests verified locally by a cheap proxy  # measured local CPU per test number (falls back to recorded)
 _class_of: dict[int, str] = {}
@@ -289,6 +292,21 @@ def main() -> None:
     if runner_mod.PROXY and runner_mod.MAX_NODES_ID in num_by_id:
         LOCAL_MS[num_by_id[runner_mod.MAX_NODES_ID]] = 400  # checked by a scaled proxy
         PROXIED.add(num_by_id[runner_mod.MAX_NODES_ID])
+    # TPC-DS execution: compare data-free traces with pristine ones (tpctrace).
+    tpc_n = num_by_id.get(runner_mod.TPC_ID)
+    tpc_dp: dict = {}
+    tpc_base_p = Path(MAPS).parent / "tpc_base.pkl"
+    tpc_dp_p = Path(MAPS).parent / "tpc_dataphase.json"
+    if TPC_PROXY and tpc_n is not None and tpc_base_p.exists() and tpc_dp_p.exists():
+        try:
+            runner_mod.TPC_BASE = pickle.loads(tpc_base_p.read_bytes()).get(runner_mod.TPC_ID, {})
+            runner_mod.TPC_REPO = REPO
+            for f, q, _ in json.loads(tpc_dp_p.read_text()):
+                tpc_dp.setdefault(f, set()).add(q)
+        except Exception:  # noqa: BLE001
+            runner_mod.TPC_BASE = {}
+    if not runner_mod.TPC_BASE:
+        tpc_n = None
     mapped = set(map_ids)
     unmapped = [num_by_id[i] for i in num_by_id if i not in mapped]
     if unmapped:
@@ -347,6 +365,26 @@ def main() -> None:
         r.tests |= users
         r.notes.append(f"import state changed ({len(changed)}): {changed[:3]}")
 
+    def tpc_proxy_ok(res) -> bool:
+        """The patch can change TPC-DS results only through what the trace sees: it
+        stays in sqlglot/ outside the executor, and leaves the functions the executor
+        runs per row (and their modules' import-time code) alone."""
+        if res.broad or not res.patched:
+            return False
+        for p in res.patched:
+            if not p.startswith("sqlglot/") or p.startswith("sqlglot/executor/"):
+                return False
+        hit = [p for p in res.patched if p in tpc_dp]
+        if hit:
+            code = {p: t for p, t in res.patched.items()}
+            swaps = hotswap.plan(REPO, code, res.trees)
+            if swaps is None:
+                return False
+            for _mod, path, _src, quals in swaps:
+                if set(quals) & tpc_dp.get(path, set()):
+                    return False
+        return True
+
     def decide(cid):
         """Decide include/local/cond for one commit; returns (local test ids, allowed)."""
         res = analyses[cid]
@@ -385,6 +423,17 @@ def main() -> None:
             saved_local[n_] = LOCAL_MS.get(n_, ms[n_])
             LOCAL_MS[n_] = int(300 + saved_local[n_] * len(qs) / max(1, maps["task_cov"][tid]["n"]))
             res.notes.append(f"{tid.split('::')[-1]}: {len(qs)} queries")
+        tpc_saved = None
+        if tpc_n is not None and tpc_n in cands and tpc_proxy_ok(res):
+            qs = allowed.get(runner_mod.TPC_ID)
+            idx = sorted(q for q in qs if q in runner_mod.TPC_BASE) if qs is not None else None
+            allowed[runner_mod.TPC_ID] = {"trace": idx}
+            tpc_saved = (LOCAL_MS.get(tpc_n, ms[tpc_n]), _class_of.get(tpc_n))
+            nq = len(idx) if idx is not None else len(runner_mod.TPC_BASE) - 1
+            LOCAL_MS[tpc_n] = TPC_TRACE_BASE_MS + TPC_TRACE_Q_MS * nq
+            _class_of[tpc_n] = "<tpc trace>"
+            PROXIED.add(tpc_n)
+            res.notes.append(f"tpc-ds trace check on {nq} queries")
         forced = bits_to_nums(res.unverified, map_ids, num_by_id) & cands if res.unverified else set()
         if forced:
             cands -= forced
@@ -450,6 +499,11 @@ def main() -> None:
             LOCAL_MS[gm_n] = gm_saved
             PROXIED.discard(gm_n)
         LOCAL_MS.update(saved_local)
+        if tpc_saved is not None:
+            if tpc_n not in saved_local:
+                LOCAL_MS[tpc_n] = tpc_saved[0]
+            _class_of[tpc_n] = tpc_saved[1]
+            PROXIED.discard(tpc_n)
         if saved_setup is not None:
             CLASS_SETUP_MS[EXEC_CLS] = saved_setup
         allowed = {t: (q if isinstance(q, dict) else sorted(q)) for t, q in allowed.items() if num_by_id[t] in set(loc)}
@@ -606,6 +660,8 @@ def main() -> None:
         d = decisions[cid]
         chosen = set(d["include"])
         r = results.get(cid, {})
+        if os.environ.get("BR_DEBUG"):
+            log(f"{cid}: local results {json.dumps({id_by_num[x]: r.get(id_by_num[x]) for x in d['local']})}")
         probe_failed = False
         for x in d["local"]:
             tid = id_by_num[x]

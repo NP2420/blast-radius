@@ -27,6 +27,11 @@ COPY maps /app/maps
 # Fingerprint of sqlglot's import-time state, made in this exact environment.
 RUN python /app/selector/fingerprint.py /opt/sqlglot /app/maps/fp_base.pkl
 
+# Pristine TPC-DS execution traces (tpctrace.py), made in this exact environment;
+# the committed copy stays if this step cannot run.
+RUN cd /opt/sqlglot && (python /app/selector/tpctrace.py /opt/sqlglot /app/maps/tpc_base.pkl.new \
+    && mv /app/maps/tpc_base.pkl.new /app/maps/tpc_base.pkl || true)
+
 # Precompile so imports at run time read .pyc; make everything readable by nobody.
 RUN python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests /app/selector \
     && chmod -R a+rX /opt/sqlglot /app

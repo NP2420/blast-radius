@@ -129,6 +129,10 @@ class Analyzer:
         res = Result()
         has_dirs = any(k.startswith("<dir>") for k in self.m["opens"])
         for fd in fds:
+            why = self._pytest_config(fd)
+            if why:
+                res.broad = why
+                return res
             if fd.is_new and not (fd.binary or fd.rename or fd.mode_change) and has_dirs:
                 if self._new_file(fd, res):
                     continue
@@ -163,6 +167,39 @@ class Analyzer:
         return res
 
     _CACHE_DEC = re.compile(r"@\s*[\w.]*\b(?:lru_cache|cache|cached_property)\b")
+
+    _PYTEST_FILES = {"pytest.ini", ".pytest.ini", "tox.ini", "conftest.py", "sitecustomize.py", "usercustomize.py"}
+
+    def _pytest_config(self, fd: FileDiff) -> str | None:
+        """Files pytest (or the interpreter) reads before any test: they can change
+        every test's outcome."""
+        names = {os.path.basename(p) for p in (fd.path, getattr(fd, "old_path", None) or fd.path)}
+        if names & self._PYTEST_FILES or any(n.endswith(".pth") for n in names):
+            return f"pytest/interpreter config {fd.path}"
+        if fd.path not in ("pyproject.toml", "setup.cfg") or fd.binary:
+            return None
+        try:
+            old = open(os.path.join(self.repo, fd.path), encoding="utf-8").read()
+            new = apply(old, fd)
+        except Exception:  # noqa: BLE001
+            return f"pytest config? {fd.path}"
+
+        def touched(text, lines):
+            ls = text.split("\n")
+            for ln in lines:
+                if "pytest" in (ls[ln - 1] if 0 < ln <= len(ls) else "").lower():
+                    return True
+                for k in range(min(ln, len(ls)) - 1, -1, -1):
+                    h = ls[k].strip()
+                    if h.startswith("["):
+                        if "pytest" in h.lower():
+                            return True
+                        break
+            return False
+
+        if touched(new, fd.added_new_lines()) or touched(old, fd.removed_old_lines()):
+            return f"pytest settings in {fd.path}"
+        return None
 
     def _unimportable(self, path: str) -> int | None:
         """Tests that load a module that will not compile; None when every test may."""
@@ -266,6 +303,16 @@ class Analyzer:
                 res.notes.append(f"{p}: test module removed")
             elif p.startswith("tests/") and p not in self.m["parent_opens"]:
                 res.notes.append(f"{p}: data file removed")
+            elif p.startswith("sqlglot/") and p.endswith(".py") and BROKEN_NARROW and \
+                    self._unimportable(p) is not None and not p.endswith("__init__.py"):
+                # A module that no longer exists: like one that will not compile.
+                b = self._unimportable(p) | listers(p)
+                res.tests |= b
+                res.strong |= b
+                res.unverified |= b
+                res.broken = True
+                res.notes.append(f"{p}: module removed, {bin(b).count('1')} tests load it")
+                return
             else:
                 res.broad = f"removed {p}"
                 return

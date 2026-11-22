@@ -85,7 +85,10 @@ def pack_cost(nums, ms) -> int:
 
 CLASS_SETUP_MS = {"tests/test_executor.py::TestExecutor": 1200}
 TPC_PROXY = os.environ.get("BR_TPC_PROXY", "1") == "1"
-BROKEN_FP = os.environ.get("BR_BROKEN_FP", "0") == "1"
+BROKEN_FP = os.environ.get("BR_BROKEN_FP", "1") == "1"
+# Lines the TPC-DS test executes changed: it fails about half the time there, so a
+# trace that usually ends in listing it anyway is not worth its CPU.
+TPC_STRONG = os.environ.get("BR_TPC_STRONG", "0") == "1"
 TPC_TRACE_BASE_MS = int(os.environ.get("BR_TPC_TRACE_BASE_MS", "400"))
 TPC_TRACE_Q_MS = int(os.environ.get("BR_TPC_TRACE_Q_MS", "62"))  # replaced from maps when present
 LOCAL_MS: dict[int, int] = {}
@@ -452,7 +455,7 @@ def main() -> None:
             LOCAL_MS[n_] = int(300 + saved_local[n_] * len(qs) / max(1, maps["task_cov"][tid]["n"]))
             res.notes.append(f"{tid.split('::')[-1]}: {len(qs)} queries")
         tpc_saved = None
-        if tpc_n is not None and tpc_n in cands and tpc_proxy_ok(res):
+        if tpc_n is not None and tpc_n in cands and (TPC_STRONG or tpc_n not in strong) and tpc_proxy_ok(res):
             qs = allowed.get(runner_mod.TPC_ID)
             idx = sorted(q for q in qs if q in runner_mod.TPC_BASE) if qs is not None else None
             allowed[runner_mod.TPC_ID] = {"trace": idx}

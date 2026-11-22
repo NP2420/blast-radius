@@ -9,6 +9,7 @@ Pipeline per commit:
 """
 from __future__ import annotations
 
+import ast
 import heapq
 import json
 import os
@@ -406,6 +407,49 @@ def main() -> None:
             not (p.startswith(("tests/", "docs/", "posts/", ".github/")) or p.endswith((".md", ".rst", ".txt"))) or
             (an.opens(p) & tbit) or os.path.basename(p) in ("conftest.py", "__init__.py"))
 
+    def exec_queries(res):
+        """Body-only executor patch: the TPC-DS queries that ever run a changed
+        function (pinned per-query coverage). None: every query (or unknown)."""
+        tc = maps.get("task_cov", {}).get(runner_mod.TPC_ID)
+        if tc is None:
+            return None
+        code = {p: t for p, t in res.patched.items() if p.startswith("sqlglot/")}
+        try:
+            swaps = hotswap.plan(REPO, code, None)
+        except Exception:  # noqa: BLE001
+            return None
+        if not swaps:
+            return None
+        q = 0
+        for _mod, path, _src, quals in swaps:
+            try:
+                tree = ast.parse(Path(REPO, path).read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                return None
+            spans = {}
+
+            def walk(node, prefix):
+                for c in ast.iter_child_nodes(node):
+                    if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        qn = f"{prefix}{c.name}"
+                        if not isinstance(c, ast.ClassDef):
+                            spans[qn] = (c.lineno, c.end_lineno)
+                        walk(c, qn + ".")
+                    else:
+                        walk(c, prefix)
+
+            walk(tree, "")
+            rest = tc["rest"].get(path, ())
+            for qn in quals:
+                if qn not in spans:
+                    return None
+                a, b = spans[qn]
+                for ln in range(a, b + 1):
+                    if ln in rest:
+                        return None  # runs in class setup: every query
+                    q |= tc["q"].get((path, ln), 0)
+        return {i for i in range(tc["n"]) if q >> i & 1}
+
     def tpc_exec_ok(res) -> bool:
         """Only the executor changed (plus files the TPC-DS run cannot see)."""
         if res.broad or res.broken or not res.patched or not runner_mod.TPC_EXEC_BASE:
@@ -507,6 +551,10 @@ def main() -> None:
         tpc_saved = None
         if tpc_n is not None and tpc_n in cands and tpc_exec_ok(res):
             qs = allowed.get(runner_mod.TPC_ID)
+            if qs is None and not res.import_fp:
+                eq = exec_queries(res)
+                if eq is not None and len(eq & set(runner_mod.TPC_EXEC_BASE)) < len(runner_mod.TPC_EXEC_BASE):
+                    qs = eq
             idx = sorted(q for q in qs if q in runner_mod.TPC_EXEC_BASE) if qs is not None else None
             allowed[runner_mod.TPC_ID] = {"exec": idx}
             tpc_saved = (LOCAL_MS.get(tpc_n, ms[tpc_n]), _class_of.get(tpc_n))

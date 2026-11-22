@@ -89,7 +89,8 @@ BROKEN_FP = os.environ.get("BR_BROKEN_FP", "1") == "1"
 # Lines the TPC-DS test executes changed: it fails about half the time there, so a
 # trace that usually ends in listing it anyway is not worth its CPU.
 TPC_STRONG = os.environ.get("BR_TPC_STRONG", "1") == "1"
-TPC_P_CAP = float(os.environ.get("BR_TPC_P_CAP", "0.5"))  # observed: strong TPC-DS fails about half the time
+TPC_P_CAP = float(os.environ.get("BR_TPC_P_CAP", "0.5"))
+TPC_EXEC = os.environ.get("BR_TPC_EXEC", "1") == "1"  # observed: strong TPC-DS fails about half the time
 TPC_TRACE_BASE_MS = int(os.environ.get("BR_TPC_TRACE_BASE_MS", "400"))
 TPC_TRACE_Q_MS = int(os.environ.get("BR_TPC_TRACE_Q_MS", "62"))  # replaced from maps when present
 LOCAL_MS: dict[int, int] = {}
@@ -310,6 +311,12 @@ def main() -> None:
                 tpc_dp.setdefault(f, set()).add(q)
         except Exception:  # noqa: BLE001
             runner_mod.TPC_BASE = {}
+    tpc_exec_p = Path(MAPS).parent / "tpc_exec_base.pkl"
+    if TPC_EXEC and tpc_exec_p.exists():
+        try:
+            runner_mod.TPC_EXEC_BASE = pickle.loads(tpc_exec_p.read_bytes()).get(runner_mod.TPC_ID, {})
+        except Exception:  # noqa: BLE001
+            runner_mod.TPC_EXEC_BASE = {}
     if not runner_mod.TPC_BASE:
         tpc_n = None
     mapped = set(map_ids)
@@ -389,6 +396,25 @@ def main() -> None:
             users |= u
         r.tests |= users
         r.notes.append(f"import state changed ({len(changed)}): {changed[:3]}")
+
+    def tpc_outside_ok(p) -> bool:
+        tbit = an.bit_of(runner_mod.TPC_ID)
+        return not (p in ("tests/test_executor.py", "tests/helpers.py") or p.startswith(
+            ("tests/fixtures/optimizer/tpc-ds/", "tests/fixtures/optimizer/tpc-h/")) or
+            not (p.startswith(("tests/", "docs/", "posts/", ".github/")) or p.endswith((".md", ".rst", ".txt"))) or
+            (an.opens(p) & tbit) or os.path.basename(p) in ("conftest.py", "__init__.py"))
+
+    def tpc_exec_ok(res) -> bool:
+        """Only the executor changed (plus files the TPC-DS run cannot see)."""
+        if res.broad or res.broken or not res.patched or not runner_mod.TPC_EXEC_BASE:
+            return False
+        ex = False
+        for p in res.patched:
+            if p.startswith("sqlglot/executor/") and p.endswith(".py"):
+                ex = True
+            elif p.startswith("sqlglot/") or not tpc_outside_ok(p):
+                return False
+        return ex
 
     def tpc_proxy_ok(res) -> bool:
         """The patch can change TPC-DS results only through what the trace sees: it
@@ -477,7 +503,17 @@ def main() -> None:
             LOCAL_MS[n_] = int(300 + saved_local[n_] * len(qs) / max(1, maps["task_cov"][tid]["n"]))
             res.notes.append(f"{tid.split('::')[-1]}: {len(qs)} queries")
         tpc_saved = None
-        if tpc_n is not None and tpc_n in cands and (TPC_STRONG or tpc_n not in strong) and tpc_proxy_ok(res):
+        if tpc_n is not None and tpc_n in cands and tpc_exec_ok(res):
+            qs = allowed.get(runner_mod.TPC_ID)
+            idx = sorted(q for q in qs if q in runner_mod.TPC_EXEC_BASE) if qs is not None else None
+            allowed[runner_mod.TPC_ID] = {"exec": idx}
+            tpc_saved = (LOCAL_MS.get(tpc_n, ms[tpc_n]), _class_of.get(tpc_n))
+            nq = len(idx) if idx is not None else len(runner_mod.TPC_EXEC_BASE)
+            LOCAL_MS[tpc_n] = 1800 + 200 * nq
+            _class_of[tpc_n] = "<tpc exec>"
+            PROXIED.add(tpc_n)
+            res.notes.append(f"tpc-ds executor check on {nq} queries")
+        elif tpc_n is not None and tpc_n in cands and (TPC_STRONG or tpc_n not in strong) and tpc_proxy_ok(res):
             qs = allowed.get(runner_mod.TPC_ID)
             idx = sorted(q for q in qs if q in runner_mod.TPC_BASE) if qs is not None else None
             allowed[runner_mod.TPC_ID] = {"trace": idx}

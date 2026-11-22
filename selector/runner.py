@@ -328,6 +328,18 @@ def _tpc_proxy(indices):
 
 
 TPC_REAL_MAX = int(os.environ.get("BR_TPC_REAL_MAX", "5"))
+TPC_EXEC_BASE: dict = {}  # query index -> pinned executor output digest (set by the parent)
+
+
+def _tpc_exec(indices) -> bool:
+    """Executor-only patch: every (chosen) executed query returns the pinned table."""
+    try:
+        import tpcexec
+        want = TPC_EXEC_BASE if indices is None else {i: TPC_EXEC_BASE[i] for i in indices if i in TPC_EXEC_BASE}
+        got = tpcexec.outputs(os.getcwd(), None if indices is None else set(indices), want)
+        return got == want
+    except BaseException:  # noqa: BLE001
+        return False
 
 
 def _gen_mem_dialects(mods: list) -> list:
@@ -367,7 +379,11 @@ def _run_tests(wfd: int, test_ids: list, allowed: dict | None, prewarmed: bool =
         os.write(wfd, (json.dumps({"id": MAX_NODES_ID, "failed": not ok}) + "\n").encode())
         test_ids = [t for t in test_ids if t != MAX_NODES_ID]
     tp = (allowed or {}).get(TPC_ID)
-    if TPC_ID in test_ids and isinstance(tp, dict) and "trace" in tp:
+    if TPC_ID in test_ids and isinstance(tp, dict) and "exec" in tp:
+        ok = _tpc_exec(tp["exec"])
+        os.write(wfd, (json.dumps({"id": TPC_ID, "failed": not ok}) + "\n").encode())
+        test_ids = [t for t in test_ids if t != TPC_ID]
+    elif TPC_ID in test_ids and isinstance(tp, dict) and "trace" in tp:
         ok, bad = _tpc_proxy(tp["trace"])
         if not ok and bad and len(bad) <= TPC_REAL_MAX:
             # Traces differ only for some queries: run the real test on just those.

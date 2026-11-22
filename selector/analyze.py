@@ -464,8 +464,28 @@ class Analyzer:
         if not anychg:
             res.notes.append(f"{path}: no query changed")
             return True
-        executed = {i for i in sqlchg if (i < len(po) and po[i][0].get("execute")) or
-                    (i < len(pn) and pn[i][0].get("execute"))}
+        # The test parses and pickles every query to submit it; sqlglot here is the
+        # pinned one (only this fixture changed), so check those queries right away.
+        parse_fails = False
+        try:
+            if self.repo not in sys.path:
+                sys.path.insert(0, self.repo)
+            import pickle as _pk
+
+            from sqlglot import parse_one as _parse_one
+        except Exception:  # noqa: BLE001
+            parse_fails = None
+        if parse_fails is False and len(res.patched) == 1:
+            for i in sqlchg:
+                if i < len(pn):
+                    try:
+                        _pk.loads(_pk.dumps(_parse_one(pn[i][1])))
+                    except Exception:  # noqa: BLE001
+                        parse_fails = True
+                        break
+        elif parse_fails is False:
+            parse_fails = None  # unknown: let the test run
+        executed = {i for i in sqlchg if i < len(pn) and pn[i][0].get("execute")}
         keep = 0
         for t in ids:
             b = 1 << idx[t]
@@ -476,18 +496,22 @@ class Analyzer:
                 continue
             name = t.rsplit("::", 1)[1]
             # Every query is parsed (and pickled) to be submitted, executed or not.
-            if kind == "tpcds" and name == "test_execute_tpcds" and sqlchg:
+            run_exec = sqlchg and (parse_fails is not False or executed)
+            if kind == "tpcds" and name == "test_execute_tpcds" and run_exec:
                 keep |= b
-            elif kind == "tpch" and name == "test_execute_tpch" and sqlchg:
+            elif kind == "tpch" and name == "test_execute_tpch" and run_exec:
                 keep |= b
             elif kind == "tpch" and name == "test_optimized_tpch":
                 keep |= b
         res.tests |= keep
         res.strong |= keep
         res.file_readers |= keep & ~self._tpc_exec_bits(kind)
-        if sqlchg:
+        if sqlchg and parse_fails:
+            res.unverified |= keep & self._tpc_exec_bits(kind)  # fails at parse: list it
+        elif sqlchg and (parse_fails is None or executed):
             res.tpc_queries[TPC_TEST[kind]] = executed
-        res.notes.append(f"{path}: queries {sorted(anychg)[:5]} changed ({len(executed)} executed): "
+        res.notes.append(f"{path}: queries {sorted(anychg)[:5]} changed ({len(executed)} executed, "
+                         f"parse fails={parse_fails}): "
                          f"{bin(keep).count('1')} tests")
         return True
 

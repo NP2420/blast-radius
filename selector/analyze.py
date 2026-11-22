@@ -29,6 +29,7 @@ def _root_inert(path: str) -> bool:
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
 OWNER_KEYS = os.environ.get("BR_OWNER_KEYS", "1") == "1"
+BROKEN_NARROW = os.environ.get("BR_BROKEN_NARROW", "1") == "1"
 MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
 IMPORT_LOCAL = os.environ.get("BR_IMPORT_LOCAL", "1") == "1"
 CLASS_HEADER_NAME = os.environ.get("BR_CLASS_HEADER_NAME", "1") == "1"
@@ -58,6 +59,7 @@ class Result:
     state_guard: bool = False                      # class/module edit: fingerprint ripple check required
     state_guard_pending: bool = False
     broad: str | None = None                       # reason, if we must run everything
+    broken: bool = False                           # a patched module cannot be imported: list res.tests as is
     patched: dict = field(default_factory=dict)   # path -> new text (None = deleted)
     notes: list = field(default_factory=list)
     trees: dict = field(default_factory=dict)      # path -> (old AST, new AST), for hot-swap planning
@@ -161,6 +163,26 @@ class Analyzer:
         return res
 
     _CACHE_DEC = re.compile(r"@\s*[\w.]*\b(?:lru_cache|cache|cached_property)\b")
+
+    def _unimportable(self, path: str) -> int | None:
+        """Tests that load a module that will not compile; None when every test may."""
+        if path.startswith("sqlglot/"):
+            mod = path[:-3].replace("/", ".")
+            if mod.endswith(".__init__"):
+                mod = mod[: -len(".__init__")]
+            sid = self.m.get("broken_mod", {}).get(mod)
+            return None if sid is None else self.sets[sid] | self.opens(path)
+        if path.startswith("tests/") and os.path.basename(path).startswith("test_"):
+            ft = self.m["file_tests"].get(path)
+            if ft is None:
+                return None
+            mod = path[:-3].replace("/", ".")
+            b = ft | self.opens(path)
+            for k, bits in self.m.get("test_importers", {}).items():
+                if k == mod or k.startswith(mod + "."):
+                    b |= bits
+            return b
+        return None
 
     def _cache_decorators(self, res: Result) -> None:
         """A memoizing decorator added or removed: results then depend on what ran
@@ -328,7 +350,16 @@ class Analyzer:
             # cannot be imported at all.
             compile(new_tree, path, "exec", dont_inherit=True)
         except (SyntaxError, ValueError):
-            res.broad = f"syntax error {path}"
+            b = self._unimportable(path) if BROKEN_NARROW else None
+            if b is None:
+                res.broad = f"syntax error {path}"
+                return
+            # The module cannot be imported: every test that loads it fails at once.
+            res.tests |= b
+            res.strong |= b
+            res.unverified |= b
+            res.broken = True
+            res.notes.append(f"{path}: syntax error, {bin(b).count('1')} tests load it")
             return
         # Text readers of the source (inspect.getsource, subprocess tools).
         res.tests |= self.opens(path)

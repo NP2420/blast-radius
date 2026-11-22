@@ -85,6 +85,7 @@ def pack_cost(nums, ms) -> int:
 
 CLASS_SETUP_MS = {"tests/test_executor.py::TestExecutor": 1200}
 TPC_PROXY = os.environ.get("BR_TPC_PROXY", "1") == "1"
+BROKEN_FP = os.environ.get("BR_BROKEN_FP", "0") == "1"
 TPC_TRACE_BASE_MS = int(os.environ.get("BR_TPC_TRACE_BASE_MS", "400"))
 TPC_TRACE_Q_MS = int(os.environ.get("BR_TPC_TRACE_Q_MS", "62"))  # replaced from maps when present
 LOCAL_MS: dict[int, int] = {}
@@ -335,6 +336,26 @@ def main() -> None:
 
     def apply_fp(c, changed):
         r = analyses[c]
+        failed = {k.split(":", 1)[1] for k in changed if k.startswith("<import-failed>:")}
+        bm = maps.get("broken_mod", {})
+        pmods = set()
+        for p in r.patched:
+            if p.startswith("sqlglot/") and p.endswith(".py"):
+                mm = p[:-3].replace("/", ".")
+                pmods.add(mm[: -len(".__init__")] if mm.endswith(".__init__") else mm)
+        if BROKEN_FP and failed and pmods and pmods <= failed and failed <= set(bm) and all(
+                p.startswith("sqlglot/") and p.endswith(".py") for p in r.patched):
+            # Every patched module now fails to import: the tests that load one fail;
+            # no other test can see the patch.
+            b = 0
+            for f in failed:
+                b |= an.sets[bm[f]]
+            r.tests |= b
+            r.strong |= b
+            r.unverified |= b
+            r.broken = True
+            r.notes.append(f"import fails for {sorted(failed)[:3]}: {bin(b).count('1')} tests load them")
+            return
         if r.key_attrs and not any(k.startswith("<") or k.startswith("global:") for k in changed):
             # The edited table (and same-name copies in subclasses) must differ;
             # anything else that changed is a ripple to account for.
@@ -393,6 +414,13 @@ def main() -> None:
             log(f"{cid}: BROAD ({res.broad})")
             return [], {}
         cands = set(unmapped) | bits_to_nums(res.tests, map_ids, num_by_id)
+        if res.broken:
+            # Unimportable module: every test that loads it fails; nothing to narrow or verify.
+            inc = sorted(cands | bits_to_nums(res.unverified, map_ids, num_by_id))
+            decisions[cid] = {"include": inc, "local": [], "patched": res.patched, "cond": []}
+            log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) local=0 (0 ms) "
+                f"{'; '.join(res.notes)[:200]}")
+            return [], {}
         strong = bits_to_nums(res.strong, map_ids, num_by_id)
         medium = bits_to_nums(res.medium, map_ids, num_by_id)
         if DROP_WEAK_HEAVY:

@@ -106,16 +106,20 @@ def _h_inner(x, depth: int, seen: set) -> str:
         seen.discard(oid)
 
 
+FAILED: list = []  # modules import_all could not import
+
+
 def import_all() -> list:
     import sqlglot
     mods = [sqlglot]
+    FAILED.clear()
     for m in pkgutil.walk_packages(sqlglot.__path__, "sqlglot."):
         if m.name == "sqlglot.__main__":
             continue
         try:
             mods.append(importlib.import_module(m.name))
         except Exception:
-            pass
+            FAILED.append(m.name)
     return mods
 
 
@@ -151,6 +155,8 @@ def fingerprint(loose_only: bool = False) -> dict[str, tuple]:
                 out[key] = dig(v)
 
     mods = sorted(import_all(), key=lambda m: m.__name__)
+    for name in FAILED:
+        out[f"<import-failed>:{name}"] = "failed"
     import logging
     import warnings
     out["global:recursionlimit"] = dig(sys.getrecursionlimit())

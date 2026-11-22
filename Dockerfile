@@ -31,6 +31,9 @@ RUN python /app/selector/fingerprint.py /opt/sqlglot /app/maps/fp_base.pkl
 # the committed copy stays if this step cannot run.
 RUN cd /opt/sqlglot && (python /app/selector/tpctrace.py /opt/sqlglot /app/maps/tpc_base.pkl.new \
     && mv /app/maps/tpc_base.pkl.new /app/maps/tpc_base.pkl || true)
+# Pinned TPC-DS executor outputs (tpcexec.py) for executor-only patches.
+RUN cd /opt/sqlglot && (SKIP_INTEGRATION=0 python /app/selector/tpcexec.py /opt/sqlglot /app/maps/tpc_exec_base.pkl.new \
+    && mv /app/maps/tpc_exec_base.pkl.new /app/maps/tpc_exec_base.pkl || true)
 
 # Precompile so imports at run time read .pyc; make everything readable by nobody.
 RUN python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests /app/selector \

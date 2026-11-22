@@ -40,3 +40,4 @@
 | 36 | `ad128586` | Sun 2:01 AM | 161.4 | 138.4 | 22.9 | 0 | v26: changed TPC fixture queries parsed in the parent: parse failure -> list the execute test directly, non-executed and parses -> drop it |
 | 37 | `98791d98` (branch diag-heavy) | Sun 2:26 AM | 419.9 | 395.8 | 24.2 | 1 | Diagnostic: tests over 5 s dropped from output: -42.7 s simulated, 1 miss (the TPC fixture commit) |
 | 38 | `e454a45d` (branch diag-tpcds) | Sun 2:35 AM | 419.7 | 395.8 | 24.0 | 1 | Diagnostic: only TPC-DS dropped: identical. TPC-DS is listed in 2 board commits; one fails (fixture), one passes (~21 s wasted) |
+| 39 | `7ff99398` | Sun 2:48 AM | 161.2 | 138.4 | 22.8 | 0 | v27: TPC-DS trace also with strong evidence, real run of few mismatching queries. Board's passing TPC-DS commit not reached by it (no CPU change) |

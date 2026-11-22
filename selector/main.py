@@ -713,8 +713,11 @@ def main() -> None:
         if probe_failed and d.get("cond"):
             chosen.update(d["cond"])
             log(f"{cid}: equiv probe failed; listing {len(d['cond'])} conditional tests")
+        _drop = {num_by_id[t] for t in os.environ.get("BR_DIAG_DROP", "").split(",") if t in num_by_id}
+        _mx = float(os.environ.get("BR_DIAG_MAXSEC", "0") or 0)
+        chosen = {x for x in chosen if x not in _drop and not (_mx and ms[x] > _mx * 1000)}
         cost, workers = pack(sorted(chosen), ms)
-        if FILL_SLACK and workers and not d.get("broad"):
+        if FILL_SLACK and workers and not d.get("broad") and not _drop and not _mx:
             workers = fill_slack(workers, insurance(cid, chosen, d, r))
         total += cost
         sys.stdout.write(json.dumps({"commit": cid, "workers": workers}) + "\n")

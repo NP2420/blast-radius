@@ -208,6 +208,12 @@ class Analyzer:
             return f"pytest settings in {fd.path}"
         return None
 
+    def bit_of(self, tid: str) -> int:
+        try:
+            return 1 << self.m["tests"].index(tid)
+        except ValueError:
+            return 0
+
     @staticmethod
     def _inert_test_module(src: str) -> bool:
         """Only imports, definitions and plain constants at module and class level."""

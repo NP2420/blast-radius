@@ -396,12 +396,22 @@ def main() -> None:
         runs per row (and their modules' import-time code) alone."""
         if res.broad or not res.patched:
             return False
+        tbit = an.bit_of(runner_mod.TPC_ID)
         for p in res.patched:
-            if not p.startswith("sqlglot/") or p.startswith("sqlglot/executor/"):
+            if p.startswith("sqlglot/executor/"):
+                return False
+            if p.startswith("sqlglot/"):
+                continue
+            # Files outside the package: harmless to the TPC-DS run unless it reads
+            # them or they are its own test module / helpers / fixtures.
+            if p in ("tests/test_executor.py", "tests/helpers.py") or p.startswith(
+                    ("tests/fixtures/optimizer/tpc-ds/", "tests/fixtures/optimizer/tpc-h/")) or \
+                    not (p.startswith(("tests/", "docs/", "posts/", ".github/")) or p.endswith((".md", ".rst", ".txt"))) or \
+                    (an.opens(p) & tbit) or os.path.basename(p) in ("conftest.py", "__init__.py"):
                 return False
         hit = [p for p in res.patched if p in tpc_dp]
         if hit:
-            code = {p: t for p, t in res.patched.items()}
+            code = {p: t for p, t in res.patched.items() if p.startswith("sqlglot/")}
             swaps = hotswap.plan(REPO, code, res.trees)
             if swaps is None:
                 return False

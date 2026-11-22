@@ -436,9 +436,20 @@ def main() -> None:
         # observe the change (or drop the test when none can).
         allowed: dict = {}
         saved_local = {}
+        for tid, qs in res.tpc_queries.items():
+            # A TPC fixture edit: the test parses every query, executes the changed
+            # executed ones. Run it locally on just those (possibly none: parse only).
+            n_ = num_by_id.get(tid)
+            if n_ is None or n_ not in cands or len(res.patched) != 1:
+                continue
+            allowed[tid] = set(qs)
+            saved_local[n_] = LOCAL_MS.get(n_, ms[n_])
+            n_exec = max(1, (maps.get("task_cov", {}).get(tid) or {}).get("n", 99))
+            LOCAL_MS[n_] = int(700 + saved_local[n_] * len(qs) / n_exec)
+            res.notes.append(f"{tid.split('::')[-1]}: fixture queries {sorted(qs)[:5]}")
         for tid in (maps.get("task_cov", {}) if TASK_PARTIAL else {}):
             n_ = num_by_id.get(tid)
-            if n_ is None or n_ not in cands:
+            if n_ is None or n_ not in cands or tid in allowed:
                 continue
             qbits = an.partial_queries(tid, res, n_ in strong, n_ in medium)
             if qbits is None:

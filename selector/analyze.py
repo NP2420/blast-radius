@@ -475,16 +475,17 @@ class Analyzer:
                 keep |= b  # optimizer fixture tests etc.: per-pair work, keep
                 continue
             name = t.rsplit("::", 1)[1]
-            if kind == "tpcds" and name == "test_execute_tpcds" and executed:
+            # Every query is parsed (and pickled) to be submitted, executed or not.
+            if kind == "tpcds" and name == "test_execute_tpcds" and sqlchg:
                 keep |= b
-            elif kind == "tpch" and name == "test_execute_tpch" and executed:
+            elif kind == "tpch" and name == "test_execute_tpch" and sqlchg:
                 keep |= b
             elif kind == "tpch" and name == "test_optimized_tpch":
                 keep |= b
         res.tests |= keep
         res.strong |= keep
         res.file_readers |= keep & ~self._tpc_exec_bits(kind)
-        if executed:
+        if sqlchg:
             res.tpc_queries[TPC_TEST[kind]] = executed
         res.notes.append(f"{path}: queries {sorted(anychg)[:5]} changed ({len(executed)} executed): "
                          f"{bin(keep).count('1')} tests")
@@ -1060,11 +1061,6 @@ class Analyzer:
         None: the test must run whole (change reaches code outside per-query work,
         or the evidence is not line-level).
         """
-        if tid in res.tpc_queries and len(res.patched) == 1:
-            q = 0
-            for i in res.tpc_queries[tid]:
-                q |= 1 << i
-            return q
         tc = self.m.get("task_cov", {}).get(tid)
         if tc is None or not (is_strong or is_medium) or res.import_fp:
             return None

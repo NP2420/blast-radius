@@ -44,3 +44,4 @@
 | 40 | `2c2d758e` (branch diag-tpcA) | Sun 3:01 AM | 140.3 | 117.0 | 23.3 | 0 | Diagnostic (UNSAFE rule, never the final pick): TPC-DS dropped where the trace check cannot apply. The board's wasted TPC-DS is in that group (-21.5 s, no miss) |
 | 41 | `01745c5c` | Sun 3:26 AM | 153.6 | 141.8 | 11.9 | 0 | v28: TPC-DS trace allowed when other patched files cannot reach the run. CPU -11 s, simulated +3.3. Best safe score |
 | 42 | `9abccbcf` (branch diag-tpcE) | Sun 3:39 AM | 132.6 | 120.3 | 12.3 | 0 | Diagnostic (UNSAFE rule, never the final pick): TPC-DS dropped for executor patches only: -21.5 s, no miss. The wasted TPC-DS is an executor-only commit |
+| 43 | `01433168` | Sun 4:01 AM | 153.6 | 141.8 | 11.8 | 0 | v29: executor-only patches checked by rerunning the executor on TPC-DS queries vs pinned result tables. Not chosen by the planner on the board (same score as v28) |

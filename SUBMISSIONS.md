@@ -26,4 +26,6 @@
 | 22 | `82947f2b` | Sat 4:42 PM | 168.1 | 141.7 | 26.4 | 0 | v15b (A/B): heavy-test odds x0.4: no decision changes on the board. Reverted to x0.6 |
 | 23 | `6050f229` | Sat 5:12 PM | 168.2 | 141.7 | 26.5 | 0 | v16: and/or swap profile, empty-registry guard, local-rename no-ops (safety for unseen kinds; board same) |
 | 24 | `f0f3252c` | Sat 5:45 PM | 168.3 | 141.7 | 27.2 | 0 | v17: scaled proxy for test_max_nodes (big gains on labels; board has no such commit) |
-| 25 | `3e431443` | Sat 6:21 PM | 164.7 | 138.4 | 26.3 | 0 | v18: lazy-load test only for core-module edits, generator-memory check on reachable dialects, CPU factor 1.0. Best so far |
+| 25 | `3e431443` | Sat 6:21 PM | 165.1 | 138.4 | 26.3 | 0 | v18: lazy-load test only for core-module edits, generator-memory check on reachable dialects, CPU factor 1.0. Best so far |
+| 26 | `a8ea9ddf` | Sat 7:07 PM | 162.5 | 138.4 | 24.1 | 0 | v19: owner-level table keys (edit reaches its class, subclasses and copies only). CPU -2.2. Best so far |
+| 27 | `6e0a2751` | Sat 8:04 PM | pending | | | | v20: TPC-DS checked by data-free execution traces instead of a 23 s listing; memoizing-decorator patches listed unverified |

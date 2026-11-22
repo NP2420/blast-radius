@@ -28,6 +28,7 @@ def _root_inert(path: str) -> bool:
     return path in ROOT_INERT
 ATTR_NARROW = os.environ.get("BR_ATTR_NARROW", "1") == "1"
 KEY_NARROW = os.environ.get("BR_KEY_NARROW", "1") == "1"
+OWNER_KEYS = os.environ.get("BR_OWNER_KEYS", "1") == "1"
 MODULE_NARROW = os.environ.get("BR_MODULE_NARROW", "1") == "1"
 IMPORT_LOCAL = os.environ.get("BR_IMPORT_LOCAL", "1") == "1"
 CLASS_HEADER_NAME = os.environ.get("BR_CLASS_HEADER_NAME", "1") == "1"
@@ -52,6 +53,8 @@ class Result:
     fp_func: bool = False                          # function code that also runs at import changed
     equiv: bool = False                            # every code change is an is/== swap against None/enum
     key_attrs: set = field(default_factory=set)    # names edited at import level (expected to differ in fingerprint)
+    plain_key_attrs: set = field(default_factory=set)  # of those, any table of that name may differ
+    key_owners: dict = field(default_factory=dict)     # key-narrowed attr -> owners ("module:Qual") edited
     state_guard: bool = False                      # class/module edit: fingerprint ripple check required
     state_guard_pending: bool = False
     broad: str | None = None                       # reason, if we must run everything
@@ -335,6 +338,7 @@ class Analyzer:
                 res.import_fp = True
                 res.state_guard = True
                 res.key_attrs |= set(added) | {"__firstlineno__"}
+                res.plain_key_attrs |= set(added) | {"__firstlineno__"}
                 res.notes.append(f"{path}: new functions {sorted(added)}")
                 return
 
@@ -446,6 +450,7 @@ class Analyzer:
             res.import_fp = True
             res.state_guard = True
             res.key_attrs |= idx.names_assigned(ln)
+            res.plain_key_attrs |= idx.names_assigned(ln)
             return
         self._import_time_heur(path, module, kind, idx, ln, res, tree)
 
@@ -457,13 +462,14 @@ class Analyzer:
         if k == "class":
             qual = kind[2]
             cls_node = kind[1]
-            keyed = self._key_narrow(idx, ln) if KEY_NARROW and tree in ("old", "new") and path.startswith("sqlglot/") else None
+            keyed = self._key_narrow(idx, ln, f"{module}:{qual}") if KEY_NARROW and tree in ("old", "new") and path.startswith("sqlglot/") else None
             if keyed is not None:
                 res.tests |= keyed
                 res.medium |= keyed
                 # Guard: the patched import may change other state through this table
                 # (copies under other names, derived tables, values parsed at import).
                 res.key_attrs.add(self._last_key_attr)
+                res.key_owners.setdefault(self._last_key_attr, set()).add(self._last_key_owner)
                 res.import_fp = True
                 res.fp_func = True
                 res.notes.append(f"{path}:{ln} key-narrowed {qual}.{self._last_key_attr}")
@@ -714,7 +720,7 @@ class Analyzer:
         bits |= self.recv(f"{module}:{name}")  # a module-level class object itself
         return bits
 
-    def _key_narrow(self, idx, ln) -> int | None:
+    def _key_narrow(self, idx, ln, owner=None) -> int | None:
         """Tests that looked up the edited entry's key in its class table.
 
         Applies to a single dict entry of an UPPERCASE class attribute. None when the
@@ -753,11 +759,25 @@ class Analyzer:
         if f"{attr}|{key}" in self.m.get("import_const_keys", set()):
             return None
         out = 0
+        self._last_key_attr = attr
+        self._last_key_owner = None
+        ou, tags = self.m.get("okey_users"), self.m.get("okey_tags")
+        if OWNER_KEYS and ou is not None and owner and f"{owner}.{attr}" in tags:
+            # Owner-level: lookups in tables an edit of this class's table can reach
+            # (its own, subclasses' and copies'), not same-name tables elsewhere.
+            tbl = ou.get(f"{owner}|{attr}", {})
+            for kk in (key, "*"):
+                sid = tbl.get(kk)
+                if sid == -1:
+                    sid = ku.get(f"{attr}|{kk}")
+                if sid is not None:
+                    out |= self.sets[sid]
+            self._last_key_owner = owner
+            return out
         for k in (f"{attr}|{key}", f"{attr}|*"):
             sid = ku.get(k)
             if sid is not None:
                 out |= self.sets[sid]
-        self._last_key_attr = attr
         return out
 
     def opens_any(self, res: "Result", bit: int) -> bool:

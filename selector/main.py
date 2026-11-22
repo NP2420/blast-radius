@@ -320,7 +320,20 @@ def main() -> None:
         if r.key_attrs and not any(k.startswith("<") or k.startswith("global:") for k in changed):
             # The edited table (and same-name copies in subclasses) must differ;
             # anything else that changed is a ripple to account for.
-            changed = [k for k in changed if k.rsplit(".", 1)[-1].rsplit(":", 1)[-1] not in r.key_attrs]
+            tags = maps.get("okey_tags") or {}
+
+            def expected(k):
+                a = k.rsplit(".", 1)[-1].rsplit(":", 1)[-1]
+                if a not in r.key_attrs:
+                    return False
+                owners = r.key_owners.get(a)
+                if a in r.plain_key_attrs or not owners or None in owners:
+                    return True
+                # Owner-level narrowing: only tables an edit of the owner's table reaches.
+                tg = tags.get(k)
+                return tg is not None and any(f"{o}|{a}" in tg for o in owners)
+
+            changed = [k for k in changed if not expected(k)]
         if not changed:
             r.notes.append("import state unchanged")
             return

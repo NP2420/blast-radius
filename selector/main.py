@@ -648,7 +648,8 @@ def main() -> None:
         if saved_setup is not None:
             CLASS_SETUP_MS[EXEC_CLS] = saved_setup
         allowed = {t: (q if isinstance(q, dict) else sorted(q)) for t, q in allowed.items() if num_by_id[t] in set(loc)}
-        decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond}
+        decisions[cid] = {"include": inc, "local": loc, "patched": res.patched, "cond": cond,
+                          "strong": set(strong), "medium": set(medium) - set(strong)}
         log(f"{cid}: cands={len(cands)} include={len(inc)} ({sum(ms[x] for x in inc)} ms) "
             f"local={len(loc)} ({sum(ms[x] for x in loc)} ms) {'; '.join(res.notes)[:200]}")
         return [id_by_num[x] for x in loc], allowed
@@ -812,8 +813,15 @@ def main() -> None:
         if probe_failed and d.get("cond"):
             chosen.update(d["cond"])
             log(f"{cid}: equiv probe failed; listing {len(d['cond'])} conditional tests")
+        _cat = os.environ.get("BR_DIAG_CAT", "")
+        if _cat and not d.get("broad"):
+            failed = {x for x in d["local"] if r.get(id_by_num[x], True)}
+            st, md = d.get("strong", set()), d.get("medium", set())
+            def _c(x):
+                return "strong" if x in st else "medium" if x in md else "weak"
+            chosen = {x for x in chosen if x in failed or _c(x) not in _cat.split(",")}
         cost, workers = pack(sorted(chosen), ms)
-        if FILL_SLACK and workers and not d.get("broad"):
+        if FILL_SLACK and workers and not d.get("broad") and not _cat:
             workers = fill_slack(workers, insurance(cid, chosen, d, r))
         total += cost
         sys.stdout.write(json.dumps({"commit": cid, "workers": workers}) + "\n")

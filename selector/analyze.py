@@ -201,6 +201,56 @@ class Analyzer:
             return f"pytest settings in {fd.path}"
         return None
 
+    @staticmethod
+    def _inert_test_module(src: str) -> bool:
+        """Only imports, definitions and plain constants at module and class level."""
+        try:
+            tree = ast.parse(src)
+        except (SyntaxError, ValueError):
+            return True  # fails to collect on its own; its tests are not ours to list
+
+        def safe_call(n):
+            try:
+                name = ast.unparse(n.func)
+            except Exception:  # noqa: BLE001
+                return False
+            return name in ("re.compile", "Path", "pathlib.Path", "unittest.skip", "unittest.skipIf",
+                            "unittest.skipUnless") or name.startswith("os.path.")
+
+        def const(v):
+            calls = [n for n in ast.walk(v) if isinstance(n, ast.Call)]
+            if not all(safe_call(c) for c in calls):
+                return False
+            return all(isinstance(n, (ast.Call, ast.keyword, ast.Constant, ast.Tuple, ast.List, ast.Dict, ast.Set,
+                                      ast.Load, ast.Name, ast.Attribute, ast.UnaryOp, ast.unaryop, ast.BinOp,
+                                      ast.operator, ast.BoolOp, ast.boolop, ast.Compare, ast.cmpop, ast.JoinedStr,
+                                      ast.FormattedValue, ast.Subscript, ast.Slice, ast.Starred))
+                       for n in ast.walk(v))
+
+        def ok(stmts, top):
+            for st in stmts:
+                if isinstance(st, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.Pass)):
+                    continue
+                if isinstance(st, ast.Expr) and isinstance(st.value, ast.Constant):
+                    continue
+                if isinstance(st, ast.ClassDef):
+                    if st.decorator_list and not all(const(d) for d in st.decorator_list):
+                        return False
+                    if not ok(st.body, False):
+                        return False
+                    continue
+                tg = st.targets if isinstance(st, ast.Assign) else [getattr(st, "target", None)]
+                if isinstance(st, (ast.Assign, ast.AnnAssign)) and st.value is not None and const(st.value) \
+                        and all(isinstance(t, ast.Name) for t in tg):
+                    continue
+                if top and isinstance(st, ast.If) and isinstance(st.test, ast.Compare) and \
+                        isinstance(st.test.left, ast.Name) and st.test.left.id == "__name__":
+                    continue
+                return False
+            return True
+
+        return ok(tree.body, True)
+
     def _unimportable(self, path: str) -> int | None:
         """Tests that load a module that will not compile; None when every test may."""
         if path.startswith("sqlglot/"):
@@ -259,6 +309,11 @@ class Analyzer:
             d = os.path.dirname(d)
         res.tests |= listers
         res.strong |= listers
+        if path.startswith("tests/") and path.endswith(".py") and not self._inert_test_module(new):
+            # pytest imports every test module before any test runs: module-level code
+            # beyond definitions can change what every later test sees.
+            res.broad = f"new test module with import-time effects {path}"
+            return False
         if path.startswith("tests/") or path.startswith(INERT_PREFIXES) or path.endswith(INERT_SUFFIXES):
             res.notes.append(f"{path}: new file, {bin(listers).count('1')} dir listers")
             return True
@@ -410,6 +465,25 @@ class Analyzer:
             return
         # Text readers of the source (inspect.getsource, subprocess tools).
         res.tests |= self.opens(path)
+        if path.startswith("tests/") and not path.startswith("tests/fixtures/") and not _ast_same(old_tree, new_tree):
+            seen = {ast.dump(st) for st in old_tree.body}
+            fresh = [st for st in new_tree.body if ast.dump(st) not in seen]
+            if fresh and not self._inert_test_module(ast.unparse(ast.Module(body=fresh, type_ignores=[]))):
+                # pytest imports every test module before running any test: new
+                # import-time code here (monkeypatching, global settings) reaches tests
+                # in other files, which a local run of those files alone would not see.
+                res.broad = f"test module import-time code changed {path}"
+                return
+        if path.startswith("tests/") and os.path.basename(path) == "__init__.py" and not _ast_same(old_tree, new_tree):
+            # A test package's __init__ runs before any test module under it loads.
+            d = os.path.dirname(path) + "/"
+            pkg = 0
+            for f, bits in self.m["file_tests"].items():
+                if f.startswith(d):
+                    pkg |= bits
+            res.tests |= pkg
+            res.strong |= pkg
+            res.notes.append(f"{path}: package init, {bin(pkg).count('1')} tests under it")
         res.trees[path] = (old_tree, new_tree) if KEEP_TREES else None
         if _ast_same(old_tree, new_tree):
             res.notes.append(f"{path}: AST unchanged")

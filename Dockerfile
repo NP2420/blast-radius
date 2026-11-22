@@ -39,6 +39,6 @@ RUN cd /opt/sqlglot && (SKIP_INTEGRATION=0 python /app/selector/tpcexec.py /opt/
 RUN python -m compileall -q /opt/sqlglot/sqlglot /opt/sqlglot/tests /app/selector \
     && chmod -R a+rX /opt/sqlglot /app
 
-ENV BR_REPO=/opt/sqlglot BR_MAPS=/app/maps/maps.pkl SKIP_INTEGRATION=0 \
+ENV BR_DIAG_CAT=medium BR_REPO=/opt/sqlglot BR_MAPS=/app/maps/maps.pkl SKIP_INTEGRATION=0 \
     PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 CMD ["python", "/app/selector/main.py"]

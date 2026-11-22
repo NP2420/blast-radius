@@ -29,4 +29,5 @@
 | 25 | `3e431443` | Sat 6:21 PM | 165.1 | 138.4 | 26.3 | 0 | v18: lazy-load test only for core-module edits, generator-memory check on reachable dialects, CPU factor 1.0. Best so far |
 | 26 | `a8ea9ddf` | Sat 7:07 PM | 162.5 | 138.4 | 24.1 | 0 | v19: owner-level table keys (edit reaches its class, subclasses and copies only). CPU -2.2. Best so far |
 | 27 | `6e0a2751` | Sat 8:04 PM | 166.1 | 138.4 | 27.6 | 0 | v20: TPC-DS checked by data-free execution traces instead of a 23 s listing; memoizing-decorator patches listed unverified. Board simulated unchanged (no passing-TPC commit there), CPU +3.6 |
-| 28 | `c41bfe8b` | Sat 9:22 PM | pending | | | | v21: syntax-error patches list only tests that load the broken module (module-need map), not every test |
+| 28 | `c41bfe8b` | Sat 9:18 PM | 160.9 | 138.4 | 22.5 | 0 | v21: syntax-error patches list only tests that load the broken module (module-need map), not every test. Best so far (board has no syntax-error commit; CPU lower) |
+| 29 | `aca028d3` | Sat 10:25 PM | pending | | | | v22: modules failing at import or deleted list only their loaders; conftest/pytest.ini/pytest settings edits run everything; TPC trace only without line evidence |

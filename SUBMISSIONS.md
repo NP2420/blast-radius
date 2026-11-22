@@ -46,3 +46,4 @@
 | 42 | `9abccbcf` (branch diag-tpcE) | Sun 3:39 AM | 132.6 | 120.3 | 12.3 | 0 | Diagnostic (UNSAFE rule, never the final pick): TPC-DS dropped for executor patches only: -21.5 s, no miss. The wasted TPC-DS is an executor-only commit |
 | 43 | `01433168` | Sun 4:01 AM | 153.6 | 141.8 | 11.8 | 0 | v29: executor-only patches checked by rerunning the executor on TPC-DS queries vs pinned result tables. Not chosen by the planner on the board (same score as v28) |
 | 44 | `658be56d` | Sun 4:26 AM | 149.9 | 120.3 | 29.6 | 0 | v30: per-query CPU caps for TPC-DS runs; executor check costed for its early stop. Board's executor commit now verified (-21.5 s simulated, +18 s CPU). Best safe score |
+| 45 | `fb5eabdf` (branch diag-mid2) | Sun 4:35 AM | 723.9 | 684.7 | 38.8 | 2 | Diagnostic: v30 with tests over 1.5 s dropped: -35.6 s simulated, 2 commits need such tests. Remaining waste in mid/heavy tests is at most ~14 s |

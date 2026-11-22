@@ -14,10 +14,39 @@ ALLOWED = [None]  # set of submission indices to run for the current test; None 
 LAZY = [False]    # run each task only when its result is first asked for (tests that read results in order)
 
 
+QUERY_CPU = [None]  # submission index -> CPU-second cap for the current test (None: no cap)
+
+
+class QueryTooSlow(Exception):
+    pass
+
+
+def _capped(idx, fn, args, kwargs):
+    """Run one submission; past its CPU cap (several times the pinned query's time)
+    raise, so a patch that makes a query crawl fails fast instead of burning CPU."""
+    caps = QUERY_CPU[0]
+    lim = caps.get(idx) if caps else None
+    if not lim:
+        return fn(*args, **kwargs)
+    import signal
+
+    def _on(sig, frm):
+        raise QueryTooSlow(f"query {idx} over {lim:.1f}s CPU")
+
+    old = signal.signal(signal.SIGPROF, _on)
+    signal.setitimer(signal.ITIMER_PROF, lim)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        signal.signal(signal.SIGPROF, old)
+
+
 class _LazyFuture(cf.Future):
-    def __init__(self, payload):
+    def __init__(self, payload, idx=None):
         super().__init__()
         self._payload = payload
+        self._idx = idx
 
     def _run(self):
         if self.done() or self._payload is None:
@@ -25,7 +54,7 @@ class _LazyFuture(cf.Future):
         payload, self._payload = self._payload, None
         try:
             fn_, args_, kwargs_ = pickle.loads(payload)
-            res = fn_(*args_, **kwargs_)
+            res = _capped(self._idx, fn_, args_, kwargs_)
             self.set_result(pickle.loads(pickle.dumps(res)))
         except BaseException as e:  # noqa: BLE001 - mirror pool behaviour
             self.set_exception(e)
@@ -55,10 +84,10 @@ class SyncExecutor(cf.Executor):
             fut.set_result(None)  # executor tests skip queries whose result is None
             return fut
         if LAZY[0]:
-            return _LazyFuture(pickle.dumps((fn, args, kwargs)))
+            return _LazyFuture(pickle.dumps((fn, args, kwargs)), idx)
         try:
             fn_, args_, kwargs_ = pickle.loads(pickle.dumps((fn, args, kwargs)))
-            res = fn_(*args_, **kwargs_)
+            res = _capped(idx, fn_, args_, kwargs_)
             fut.set_result(pickle.loads(pickle.dumps(res)))
         except BaseException as e:  # noqa: BLE001 - mirror pool behaviour
             fut.set_exception(e)

@@ -314,7 +314,9 @@ def main() -> None:
     tpc_exec_p = Path(MAPS).parent / "tpc_exec_base.pkl"
     if TPC_EXEC and tpc_exec_p.exists():
         try:
-            runner_mod.TPC_EXEC_BASE = pickle.loads(tpc_exec_p.read_bytes()).get(runner_mod.TPC_ID, {})
+            _eb = pickle.loads(tpc_exec_p.read_bytes())
+            runner_mod.TPC_EXEC_BASE = _eb.get(runner_mod.TPC_ID, {})
+            runner_mod.TPC_TIMES = _eb.get("times", {}).get(runner_mod.TPC_ID, {})
         except Exception:  # noqa: BLE001
             runner_mod.TPC_EXEC_BASE = {}
     if not runner_mod.TPC_BASE:

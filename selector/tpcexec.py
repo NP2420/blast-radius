@@ -25,7 +25,7 @@ def _digest(s: str) -> str:
     return hashlib.blake2b(s.encode("utf-8", "surrogatepass"), digest_size=16).hexdigest()
 
 
-def outputs(repo: str, indices=None, want: dict | None = None) -> dict:
+def outputs(repo: str, indices=None, want: dict | None = None, caps: dict | None = None, times: dict | None = None) -> dict:
     """query index -> digest of the executor's result. With `want`, stops at the first
     query whose digest differs from it (that entry is still returned)."""
     if repo not in sys.path:
@@ -43,11 +43,29 @@ def outputs(repo: str, indices=None, want: dict | None = None) -> dict:
         for i, (meta, sql, _) in enumerate(cls.tpcds_sqls):
             if not meta.get("execute") or (indices is not None and i not in indices):
                 continue
+            import resource
+            import signal
+
+            t0 = resource.getrusage(resource.RUSAGE_SELF).ru_utime
+            lim = (caps or {}).get(i)
+
+            def _on(sig, frm):
+                raise TimeoutError(f"query {i} over {lim}s CPU")
+
+            if lim:
+                old = signal.signal(signal.SIGPROF, _on)
+                signal.setitimer(signal.ITIMER_PROF, lim)
             try:
                 t = te.mp_execute(parse_one(sql), meta)
                 s = repr((list(t.columns), [tuple(r) for r in t.rows]))
             except Exception as e:  # noqa: BLE001
                 s = f"raised {type(e).__name__}: {e}"
+            finally:
+                if lim:
+                    signal.setitimer(signal.ITIMER_PROF, 0)
+                    signal.signal(signal.SIGPROF, old)
+            if times is not None:
+                times[i] = resource.getrusage(resource.RUSAGE_SELF).ru_utime - t0
             out[i] = _digest(s)
             if want is not None and want.get(i) != out[i]:
                 break
@@ -62,7 +80,8 @@ def outputs(repo: str, indices=None, want: dict | None = None) -> dict:
 if __name__ == "__main__":
     repo, dst = sys.argv[1], sys.argv[2]
     os.chdir(repo)
-    d = outputs(repo)
+    times: dict = {}
+    d = outputs(repo, times=times)
     with open(dst, "wb") as f:
-        pickle.dump({TID: d}, f, protocol=5)
+        pickle.dump({TID: d, "times": {TID: times}}, f, protocol=5)
     print(f"{len(d)} executed queries", file=sys.stderr)

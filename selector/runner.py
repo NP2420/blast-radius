@@ -191,6 +191,7 @@ class _Result(unittest.TestResult):
             # TPC executor tests read pool results in submission order: compute each
             # query only when asked, so a test stopped at its first failure skips the rest.
             sp.LAZY[0] = EARLY_STOP and tid in _LAZY_TESTS
+            sp.QUERY_CPU[0] = _tpc_caps() if tid == TPC_ID and TPC_TIMES else None
 
     def _fail(self):
         self.cur_fail = True
@@ -329,6 +330,12 @@ def _tpc_proxy(indices):
 
 TPC_REAL_MAX = int(os.environ.get("BR_TPC_REAL_MAX", "5"))
 TPC_EXEC_BASE: dict = {}  # query index -> pinned executor output digest (set by the parent)
+TPC_TIMES: dict = {}      # query index -> pinned CPU seconds of the query (set by the parent)
+TPC_CAP_X = float(os.environ.get("BR_TPC_CAP_X", "6"))
+
+
+def _tpc_caps() -> dict:
+    return {i: max(1.0, TPC_CAP_X * t + 0.5) for i, t in TPC_TIMES.items()}
 
 
 def _tpc_exec(indices) -> bool:
@@ -336,7 +343,7 @@ def _tpc_exec(indices) -> bool:
     try:
         import tpcexec
         want = TPC_EXEC_BASE if indices is None else {i: TPC_EXEC_BASE[i] for i in indices if i in TPC_EXEC_BASE}
-        got = tpcexec.outputs(os.getcwd(), None if indices is None else set(indices), want)
+        got = tpcexec.outputs(os.getcwd(), None if indices is None else set(indices), want, _tpc_caps())
         return got == want
     except BaseException:  # noqa: BLE001
         return False

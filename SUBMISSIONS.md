@@ -37,4 +37,6 @@
 | 33 | `b591520a` | Sun 1:25 AM | rejected | | | | Mistyped commit hash (not in repo); no effect on scores |
 | 34 | `6c004fff` | Sun 1:26 AM | 441.6 | 417.2 | 24.4 | 1 | v24: TPC-DS/TPC-H fixture edits charged per query; expected-output-only edits skip the executor tests (25.5 s -> 4.2 s). Board has a TPC fixture commit: -21.2 s simulated, but 1 miss (test parses every query; a broken non-executed query fails it) |
 | 35 | `dccc347c` | Sun 1:36 AM | 169.7 | 138.4 | 31.3 | 0 | v25: fix - any TPC fixture SQL change keeps the execute test, verified locally (parse all + run changed queries). Board's TPC fixture commit really fails TPC-DS: no simulated gain, local check cost ~6 s CPU |
-| 36 | `ad128586` | Sun 2:02 AM | pending | | | | v26: changed TPC fixture queries parsed in the parent: parse failure -> list the execute test directly, non-executed and parses -> drop it |
+| 36 | `ad128586` | Sun 2:01 AM | 161.4 | 138.4 | 22.9 | 0 | v26: changed TPC fixture queries parsed in the parent: parse failure -> list the execute test directly, non-executed and parses -> drop it |
+| 37 | `98791d98` (branch diag-heavy) | Sun 2:26 AM | 419.9 | 395.8 | 24.2 | 1 | Diagnostic: tests over 5 s dropped from output: -42.7 s simulated, 1 miss (the TPC fixture commit) |
+| 38 | `e454a45d` (branch diag-tpcds) | Sun 2:35 AM | 419.7 | 395.8 | 24.0 | 1 | Diagnostic: only TPC-DS dropped: identical. TPC-DS is listed in 2 board commits; one fails (fixture), one passes (~21 s wasted) |

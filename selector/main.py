@@ -511,7 +511,7 @@ def main() -> None:
             allowed[runner_mod.TPC_ID] = {"exec": idx}
             tpc_saved = (LOCAL_MS.get(tpc_n, ms[tpc_n]), _class_of.get(tpc_n))
             nq = len(idx) if idx is not None else len(runner_mod.TPC_EXEC_BASE)
-            LOCAL_MS[tpc_n] = 1800 + 200 * nq
+            LOCAL_MS[tpc_n] = 1800 + 120 * nq  # stops at the first differing query
             _class_of[tpc_n] = "<tpc exec>"
             PROXIED.add(tpc_n)
             res.notes.append(f"tpc-ds executor check on {nq} queries")
